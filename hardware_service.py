@@ -464,6 +464,7 @@ def _open_esp_serial():
 
 FRIABILITY_RPM_MIN = 20
 FRIABILITY_RPM_MAX = 70
+FRIABILITY_INIT_RPM = 12
 
 
 def _friability_placeholder_response(cmd: str) -> Optional[dict]:
@@ -907,53 +908,104 @@ def cmd_stop_friability():
     return last_result
 
 
+def _cmd_start_init_jog(rpm: int = FRIABILITY_INIT_RPM):
+    """Forward jog at init RPM (bypasses normal 20–70 test range)."""
+    try:
+        r = int(rpm)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "invalid init rpm"}
+    if r < 1 or r > FRIABILITY_RPM_MAX:
+        return {"ok": False, "error": f"init rpm must be between 1 and {FRIABILITY_RPM_MAX}"}
+    result = send_command(
+        f"start,{r}*",
+        ignore_numeric_response=True,
+        drain_before=True,
+        clear_input=False,
+        timeout=6.0,
+        max_retries=1,
+    )
+    if not result.get("ok"):
+        return result
+    err = _hardware_error_result(result)
+    if err:
+        return err
+    if not _ack_ok(result):
+        norm = normalize_line(result.get("normalized") or "").lower()
+        return {"ok": False, "error": norm or "unexpected response", **result}
+    reset_live_state(target_rpm=r)
+    result["rpm"] = r
+    result["targetRpm"] = r
+    result["mode"] = "init"
+    return result
+
+
 def cmd_initialise():
-    """Send initialise*; retry quickly if the first ack is missed."""
+    """Initialize drums: forward at 12 RPM, run initialise*, then always stop."""
     last_result: Dict[str, Any] = {"ok": False, "error": "initialize not acknowledged"}
-    for attempt in range(3):
-        if attempt > 0:
-            time.sleep(1.5 * attempt)
-            drain_queue(max_lines=200)
-        result = send_command(
-            "initialise*",
-            # The first initialize after an idle period can be dropped by the MCU.
-            # Retry quickly on a missed ack instead of blocking the UI for 90 seconds.
-            timeout=6.0,
-            ignore_numeric_response=True,
-            drain_before=True,
-            clear_input=False,
-            max_retries=1,
-        )
-        last_result = result
-        if not result.get("ok"):
-            continue
-        err = _hardware_error_result(result)
-        if err:
-            last_result = err
-            continue
-        norm = normalize_line(result.get("normalized") or result.get("response") or "").lower()
-        if _is_completion_line(norm):
-            result["initialized"] = True
-            result["doneLine"] = result.get("response")
-            return result
-        if not _ack_ok(result):
-            last_result = {"ok": False, "error": norm or "unexpected response", **result}
-            continue
-        if result.get("placeholder"):
-            time.sleep(0.4)
-            result["initialized"] = True
-            result["doneLine"] = "done"
-            return result
-        done = _wait_for_stream_event(
-            accept_kinds=("completed",),
-            accept_normalized=tuple(_COMPLETION_NORMALIZED),
-            timeout_sec=90.0,
-        )
-        if done.get("ok"):
-            result["initialized"] = True
-            result["doneLine"] = done.get("response")
-            return result
-        last_result = done
+    jog = _cmd_start_init_jog(FRIABILITY_INIT_RPM)
+    if not jog.get("ok"):
+        try:
+            cmd_stop_friability()
+        except Exception:
+            pass
+        return jog
+    try:
+        for attempt in range(3):
+            if attempt > 0:
+                time.sleep(1.5 * attempt)
+                drain_queue(max_lines=200)
+            result = send_command(
+                "initialise*",
+                # The first initialize after an idle period can be dropped by the MCU.
+                # Retry quickly on a missed ack instead of blocking the UI for 90 seconds.
+                timeout=6.0,
+                ignore_numeric_response=True,
+                drain_before=True,
+                clear_input=False,
+                max_retries=1,
+            )
+            last_result = result
+            if not result.get("ok"):
+                continue
+            err = _hardware_error_result(result)
+            if err:
+                last_result = err
+                continue
+            norm = normalize_line(result.get("normalized") or result.get("response") or "").lower()
+            if _is_completion_line(norm):
+                result["initialized"] = True
+                result["doneLine"] = result.get("response")
+                result["initRpm"] = FRIABILITY_INIT_RPM
+                last_result = result
+                break
+            if not _ack_ok(result):
+                last_result = {"ok": False, "error": norm or "unexpected response", **result}
+                continue
+            if result.get("placeholder"):
+                time.sleep(0.4)
+                result["initialized"] = True
+                result["doneLine"] = "done"
+                result["initRpm"] = FRIABILITY_INIT_RPM
+                last_result = result
+                break
+            done = _wait_for_stream_event(
+                accept_kinds=("completed",),
+                accept_normalized=tuple(_COMPLETION_NORMALIZED),
+                timeout_sec=90.0,
+            )
+            if done.get("ok"):
+                result["initialized"] = True
+                result["doneLine"] = done.get("response")
+                result["initRpm"] = FRIABILITY_INIT_RPM
+                last_result = result
+                break
+            last_result = done
+    finally:
+        try:
+            cmd_stop_friability()
+        except Exception:
+            pass
+        stop_live_state()
     return last_result
 
 

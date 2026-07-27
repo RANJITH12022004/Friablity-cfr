@@ -902,6 +902,47 @@ def _is_friability_validation_run(run: Dict[str, Any]) -> bool:
     return sub == "usp" or "friability" in usp
 
 
+def _validation_expected_value(run: Dict[str, Any]):
+    if not isinstance(run, dict):
+        return None
+    for key in ("expectedTapCount", "expectedRotationCount"):
+        if run.get(key) not in (None, "", "--"):
+            return run.get(key)
+    return None
+
+
+def _validation_actual_value(run: Dict[str, Any]):
+    if not isinstance(run, dict):
+        return None
+    for key in ("actualTapCount", "actualRotationCount"):
+        if run.get(key) not in (None, "", "--"):
+            return run.get(key)
+    return None
+
+
+def _validation_duration_sec(run: Dict[str, Any]):
+    if not isinstance(run, dict):
+        return None
+    for key in ("validationDurationSec", "durationSeconds", "durationSec"):
+        if run.get(key) is not None:
+            return run.get(key)
+    return None
+
+
+def _validation_time_minutes(run: Dict[str, Any]):
+    if not isinstance(run, dict):
+        return None
+    if run.get("timeMinutes") not in (None, "", "--"):
+        return run.get("timeMinutes")
+    dur = _validation_duration_sec(run)
+    if dur is None:
+        return None
+    try:
+        return round(float(dur) / 60.0, 3)
+    except (TypeError, ValueError):
+        return None
+
+
 def _validation_run_detail_pairs(run: Dict[str, Any]) -> list:
     pairs = [
         ("Start Time", _format_ts_readable(run.get("validationStartTime") or run.get("testStartTime"))),
@@ -910,18 +951,18 @@ def _validation_run_detail_pairs(run: Dict[str, Any]) -> list:
     if _is_friability_validation_run(run):
         pairs.extend([
             ("RPM", _cell_str(run.get("rpm") or run.get("tapsMin"))),
-            ("Duration (min)", _cell_str(run.get("timeMinutes"))),
+            ("Duration (min)", _cell_str(_validation_time_minutes(run))),
             ("Expected rotations", _validation_expected_display(run)),
-            ("Actual rotations", _cell_str(run.get("actualTapCount"))),
+            ("Actual rotations", _cell_str(_validation_actual_value(run))),
         ])
     else:
         pairs.extend([
             ("Taps/Min", _cell_str(run.get("tapsMin"))),
             ("Drop (mm)", _cell_str(run.get("dropHeight"))),
             ("Expected", _validation_expected_display(run)),
-            ("Actual", _cell_str(run.get("actualTapCount"))),
+            ("Actual", _cell_str(_validation_actual_value(run))),
         ])
-    dur = run.get("validationDurationSec") or run.get("durationSeconds")
+    dur = _validation_duration_sec(run)
     if dur is not None:
         try:
             pairs.append(("Elapsed", f"{int(dur)} s"))
@@ -939,7 +980,9 @@ def _validation_usp_label(run: Dict[str, Any]) -> str:
 
 
 def _validation_expected_display(run: Dict[str, Any]) -> str:
-    expected = run.get("expectedTapCount", "--")
+    expected = _validation_expected_value(run)
+    if expected is None:
+        expected = "--"
     tol = run.get("expectedTolerance")
     if tol is not None and expected not in (None, "--", ""):
         try:
@@ -971,20 +1014,23 @@ def _format_thermal_validation_runs_block(runs: list, width: int = THERMAL_WIDTH
         lines.append(_validation_usp_label(run))
         if _is_friability_validation_run(run):
             lines.append(f"RPM: {_cell_str(run.get('rpm') or run.get('tapsMin'))}")
-            lines.append(f"Duration (min): {_cell_str(run.get('timeMinutes'))}")
+            lines.append(f"Duration (min): {_cell_str(_validation_time_minutes(run))}")
             lines.append(f"Expected rotations: {_validation_expected_display(run)}")
-            lines.append(f"Actual rotations: {_cell_str(run.get('actualTapCount'))}")
+            lines.append(f"Actual rotations: {_cell_str(_validation_actual_value(run))}")
         else:
             lines.append(f"Taps/Min: {_cell_str(run.get('tapsMin'))}")
             lines.append(f"Drop(mm): {_cell_str(run.get('dropHeight'))}")
             lines.append(f"Expected: {_validation_expected_display(run)}")
-            lines.append(f"Actual: {_cell_str(run.get('actualTapCount'))}")
-        dur = run.get("validationDurationSec")
+            lines.append(f"Actual: {_cell_str(_validation_actual_value(run))}")
+        dur = _validation_duration_sec(run)
         if dur is not None:
             try:
                 lines.append(f"Duration: {int(dur)} s")
             except (TypeError, ValueError):
                 pass
+        start = run.get("validationStartTime") or run.get("testStartTime")
+        if start:
+            lines.append(f"Start Time: {_format_ts_readable(start)}")
         lines.append(f"Status: {_cell_str(run.get('status'))}")
     lines.extend(["", _thermal_sep("-", w), ""])
     return lines
@@ -1104,11 +1150,28 @@ def _format_thermal_run_detail_lines(td: Dict[str, Any], run_details: Any, width
 def _append_test_report_details(lines: list, td: Dict[str, Any], report_data: Dict[str, Any], width: int, thermal: bool) -> None:
     """Append run details, friability drum rows, then remarks (matches A4 / on-screen preview)."""
     dash = "" if thermal else ("-" * width)
+    # Comments: only approvalRemarks (and power-interruption system text). Never Mode/Target remarks.
     remarks = report_data.get("approvalRemarks")
     if remarks in (None, ""):
-        remarks = report_data.get("remarks")
-    if remarks is None and isinstance(td, dict):
-        remarks = td.get("remarks")
+        cause = str(
+            report_data.get("abortCause")
+            or (td.get("abortCause") if isinstance(td, dict) else "")
+            or ""
+        ).strip().lower()
+        approved_by = str(report_data.get("approvedBy") or "").strip().lower()
+        fallback = report_data.get("remarks")
+        if fallback in (None, "") and isinstance(td, dict):
+            fallback = td.get("remarks")
+        fb = str(fallback or "").strip().lower()
+        is_power = (
+            cause in ("power_interruption", "power_loss", "power")
+            or "power interruption" in approved_by
+            or "power interruption" in fb
+        )
+        if is_power and fallback not in (None, ""):
+            remarks = fallback
+        else:
+            remarks = None
 
     if not isinstance(td, dict):
         td = {}
@@ -1248,6 +1311,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                 f"Test Type: {derived.get('testType', '--')}",
                 f"Test Method: {derived.get('testMethod', '--')}",
                 f"RPM: {derived.get('rpm', '--')}",
+                f"Rotations: {derived.get('rotationCount', '--')}",
                 f"Drums: {derived.get('drumCount', '--')}",
                 f"Duration: {derived.get('durationFormatted', '--')}",
                 f"Test Start Date: {start_date}",
@@ -1265,6 +1329,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                 ("Test Type", derived.get("testType", "--")),
                 ("Test Method", derived.get("testMethod", "--")),
                 ("RPM", derived.get("rpm", "--")),
+                ("Rotations", derived.get("rotationCount", "--")),
                 ("Drums", derived.get("drumCount", "--")),
                 ("Duration", derived.get("durationFormatted", "--")),
                 ("Test Start Date", start_date),
@@ -1325,17 +1390,20 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
 
 
 def format_for_a4_printer(
-    report_data: Dict[str, Any], *, include_printed_timestamp: bool = True
+    report_data: Dict[str, Any],
+    *,
+    include_printed_timestamp: bool = True,
+    timestamp_kind: str = "printed",
 ) -> str:
     text = _format_report_text(report_data, width=A4_TEXT_WIDTH).rstrip("\n")
     if not include_printed_timestamp:
         return text
-    footer = "\n".join(_thermal_printed_timestamp_lines())
+    footer = "\n".join(_report_timestamp_footer_lines(timestamp_kind))
     return text + "\n\n" + footer
 
 
-def _thermal_printed_timestamp_lines() -> list:
-    """Printed date/time from device RTC at format time."""
+def _report_timestamp_footer_lines(kind: str = "printed") -> list:
+    """Date/time footer from device RTC. kind: 'printed' | 'exported'."""
     try:
         import rtc_service
 
@@ -1346,17 +1414,34 @@ def _thermal_printed_timestamp_lines() -> list:
         now = datetime.now()
         pdate = now.strftime("%d-%m-%Y")
         ptime = now.strftime("%H:%M:%S")
-    return ["", f"Printed Date: {pdate}", f"Printed Time: {ptime}"]
+    label = "Exported" if str(kind or "").strip().lower() == "exported" else "Printed"
+    return ["", f"{label} Date: {pdate}", f"{label} Time: {ptime}"]
+
+
+def _thermal_printed_timestamp_lines() -> list:
+    """Printed date/time from device RTC at format time."""
+    return _report_timestamp_footer_lines("printed")
 
 
 def _thermal_trailing_feed() -> str:
     return "\n" * THERMAL_POST_PRINT_FEED_LINES
 
 
-def format_for_thermal_printer(report_data: Dict[str, Any]) -> str:
+def format_for_thermal_printer(
+    report_data: Dict[str, Any], *, timestamp_kind: str = "printed"
+) -> str:
     text = _format_report_text(report_data, width=THERMAL_WIDTH).rstrip("\n")
-    footer = "\n".join(_thermal_printed_timestamp_lines())
+    footer = "\n".join(_report_timestamp_footer_lines(timestamp_kind))
     return text + "\n\n" + footer + _thermal_trailing_feed()
+
+
+def format_for_export(report_data: Dict[str, Any], *, thermal: bool = False) -> str:
+    """A4/thermal text with Exported Date/Time at the end (for USB/file export)."""
+    if thermal:
+        return format_for_thermal_printer(report_data, timestamp_kind="exported")
+    return format_for_a4_printer(
+        report_data, include_printed_timestamp=True, timestamp_kind="exported"
+    )
 
 
 def save_report_text_files(report_data: Dict[str, Any], report_id: int, reports_dir: pathlib.Path) -> None:
@@ -1365,8 +1450,9 @@ def save_report_text_files(report_data: Dict[str, Any], report_id: int, reports_
     try:
         reports_dir = pathlib.Path(reports_dir)
         reports_dir.mkdir(parents=True, exist_ok=True)
-        text_48 = format_for_thermal_printer(report_data)
-        text_80 = format_for_a4_printer(report_data).rstrip() + "\r\n\x0c"
+        # Stored text matches preview: no Printed/Exported stamp (stamped at live print/export).
+        text_48 = _format_report_text(report_data, width=THERMAL_WIDTH).rstrip("\n") + _thermal_trailing_feed()
+        text_80 = format_for_a4_printer(report_data, include_printed_timestamp=False).rstrip() + "\r\n\x0c"
         (reports_dir / f"report_{report_id}_a4.txt").write_text(text_80, encoding="utf-8")
         (reports_dir / f"report_{report_id}_thermal.txt").write_text(text_48, encoding="utf-8")
     except Exception as e:

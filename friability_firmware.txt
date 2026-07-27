@@ -18,6 +18,7 @@ Firmware team should implement command parsing and reply formats exactly as spec
 - Pi sends `pause*` / `resume*` for pause and resume (count continues on resume).
 - Pi sends `stop*` when the run ends or the user aborts.
 - Pi sends `dispense*` for auto-dispense (reverse drum).
+- Pi sends `initialise*` after starting forward jog at **12 RPM** for Initialize; ESP completes init then Pi sends `stop*`.
 - Pi owns all timing (USP 4 min, custom time, or count-derived duration).
 
 ## Command set
@@ -158,6 +159,23 @@ complete
 
 (`complete` or `complete.` accepted by Pi.)
 
+### 4) Initialise (forward jog at 12 RPM)
+
+**Pi sequence:**
+
+1. `start,12*` — drums forward at **12 RPM** (init-only; normal test/validation RPM remains 20–70).
+2. `initialise*` — ESP finishes positioning / init, then replies `ok` and a completion line (`done` / `complete`).
+3. `stop*` — Pi always stops the motor after init success or failure.
+
+**Expected replies (ESP -> Pi) for `initialise*`:**
+
+```text
+ok
+done
+```
+
+(`done`, `complete`, or `complete.` accepted by Pi.)
+
 ## Examples (command / reply transcripts)
 
 ### A) Test — start, pause, resume, stop
@@ -219,7 +237,8 @@ ESP: complete
 ## Firmware implementation checklist
 
 - UART: **9600** baud (default; match `ESP_BAUD` in kiosk config).
-- Parse `start,<rpm>*`, `val,<rpm>*`, `pause*`, `resume*`, `stop*`, `dispense*`.
+- Parse `start,<rpm>*`, `val,<rpm>*`, `pause*`, `resume*`, `stop*`, `dispense*`, `initialise*`.
+- Accept `start,12*` during Initialize (init jog); normal test/validation RPM remains 20–70.
 - Validate RPM 20–70 for start/val.
 - Reply `ok` to all command acks (including stop).
 - Stream plain integers in start mode; `count,rpm` lines in val mode.

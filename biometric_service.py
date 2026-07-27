@@ -8,6 +8,7 @@ import errno
 import os
 import threading
 import time
+from typing import Any, Dict
 
 try:
     import serial
@@ -324,3 +325,79 @@ def delete_template(template_id):
 
 def clear_templates():
     return _exec(bytes([_CMD_EMPTY]), timeout_sec=3.0)
+
+
+def close_serial():
+    """Close the UART handle so factory reset can reclaim the sensor cleanly."""
+    global _ser
+    with _lock:
+        if _ser is not None:
+            try:
+                if getattr(_ser, "is_open", False):
+                    _ser.close()
+            except Exception:
+                pass
+            _ser = None
+
+
+def clear_all_templates(max_attempts: int = 3) -> Dict[str, Any]:
+    """Erase every fingerprint template from the sensor, with retry and fallback deletes."""
+    if not sensor_available():
+        return dict(_hardware_unavailable_response())
+
+    attempts = 0
+    last_error = ""
+    for attempt in range(max(1, int(max_attempts))):
+        attempts = attempt + 1
+        close_serial()
+        time.sleep(0.15)
+        verify = verify_sensor()
+        if not verify.get("ok"):
+            last_error = verify.get("error") or "Sensor verification failed"
+            continue
+        emptied = clear_templates()
+        if not emptied.get("ok"):
+            last_error = emptied.get("error") or "Empty database command failed"
+            continue
+        count = get_template_count()
+        if count.get("ok") and int(count.get("count") or 0) == 0:
+            return {
+                "ok": True,
+                "cleared": True,
+                "attempts": attempts,
+                "templatesRemaining": 0,
+            }
+        last_error = "Template count still {} after empty".format(count.get("count"))
+
+    # Fallback: delete template slots individually (covers busy/partial empty failures).
+    close_serial()
+    time.sleep(0.15)
+    verify = verify_sensor()
+    if verify.get("ok"):
+        for template_id in range(1, 1001):
+            delete_template(template_id)
+        count = get_template_count()
+        if count.get("ok") and int(count.get("count") or 0) == 0:
+            return {
+                "ok": True,
+                "cleared": True,
+                "attempts": attempts,
+                "fallback": True,
+                "templatesRemaining": 0,
+            }
+        remaining = int(count.get("count") or 0) if count.get("ok") else -1
+        return {
+            "ok": False,
+            "cleared": False,
+            "attempts": attempts,
+            "fallback": True,
+            "templatesRemaining": remaining,
+            "error": last_error or "Fingerprint templates could not be fully cleared",
+        }
+
+    return {
+        "ok": False,
+        "cleared": False,
+        "attempts": attempts,
+        "error": last_error or verify.get("error") or "Biometric sensor unavailable",
+    }

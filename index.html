@@ -464,6 +464,7 @@
                         </div>
                         <div class="add-member-actions members-actions-row">
                             <button class="btn btn-primary" onclick="submitPasswordResetFromLoginPage()">Update Password</button>
+                            <button type="button" class="btn btn-secondary" id="password-reset-cancel-btn" style="display: none;" onclick="cancelProfilePasswordReset()">Cancel</button>
                         </div>
                     </div>
                 </div>
@@ -967,7 +968,7 @@
                 <!-- Report Preview Page -->
                 <div class="page" id="page-report-preview">
                     <div class="reports-container">
-                        <div id="report-pending-lock-banner" class="report-pending-lock-banner" style="display: none;"><strong>Awaiting approval.</strong> Complete Pass/Fail and sign on this screen to approve the report. You cannot leave or log out until approved. If power is interrupted, the report will be saved as Aborted (power interruption).</div>
+                        <div id="report-pending-lock-banner" class="report-pending-lock-banner" style="display: none;"><strong>Awaiting approval.</strong> Complete Pass/Fail and sign on this screen to approve the report. You cannot leave or log out until approved. If power is interrupted during a completed test awaiting approval, the report will be saved as Aborted (power interruption). Operator aborts stay Aborted.</div>
                         <div class="report-preview-container report-print-template" id="report-content">
                             <pre id="report-a4-text-preview" class="report-a4-text-preview" style="display: none;"></pre>
                             <div id="report-legacy-preview">
@@ -1575,9 +1576,8 @@
                                         placeholder="Full name">
                                 </div>
                                 <div class="form-group full-width">
-                                    <label>Edit Password</label>
-                                    <input type="password" id="profile-password" class="input-field"
-                                        placeholder="Enter new password">
+                                    <label>Password</label>
+                                    <button type="button" class="btn btn-blue btn-block" id="profile-edit-password-btn" onclick="openProfilePasswordResetPage()">Edit Password</button>
                                 </div>
                             </div>
                         </div>
@@ -1996,7 +1996,7 @@
     <script src="/keyboard.js?v=3"></script>
     <script src="/input-focus.js?v=1"></script>
     <script src="/rbac.js?v=7"></script>
-    <script src="/script.js?v=79"></script>
+    <script src="/script.js?v=85"></script>
 </body>
 
 </html>

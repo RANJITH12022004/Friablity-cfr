@@ -36,6 +36,49 @@ var validationRunStartMs = null;
 var validationRunLastCheckpointElapsed = -1;
 var VALIDATION_TARGET_RPM = 25;
 var VALIDATION_RPM_WARMUP_ROTATIONS = 6;
+
+function _recomputeValidationExpectedRotations() {
+    var expected = Math.round(VALIDATION_TARGET_RPM * (VALIDATION_RUN_DURATION_SEC / 60));
+    validationRunTarget = expected;
+    validationRunTolerance = 1;
+    validationRunMin = expected - validationRunTolerance;
+    validationRunMax = expected + validationRunTolerance;
+    return expected;
+}
+
+function _validationStartIso() {
+    if (validationRunStartMs != null && isFinite(validationRunStartMs)) {
+        if (typeof formatLocalWallClockIso === 'function') {
+            return formatLocalWallClockIso(new Date(validationRunStartMs));
+        }
+        return new Date(validationRunStartMs).toISOString();
+    }
+    if (typeof formatLocalWallClockIso === 'function') return formatLocalWallClockIso();
+    return new Date().toISOString();
+}
+
+/** Add print/preview aliases so A4 readers find start time and expected/actual rotations. */
+function _enrichValidationRunFields(run) {
+    if (!run || typeof run !== 'object') return run;
+    var durationSec = run.durationSec != null ? run.durationSec : VALIDATION_RUN_DURATION_SEC;
+    var startIso = run.validationStartTime || run.testStartTime || _validationStartIso();
+    run.validationStartTime = startIso;
+    run.testStartTime = startIso;
+    run.expectedRotationCount = run.expectedRotationCount != null ? run.expectedRotationCount : validationRunTarget;
+    run.actualRotationCount = run.actualRotationCount != null ? run.actualRotationCount : validationRunCurrentCount;
+    run.expectedTapCount = run.expectedRotationCount;
+    run.actualTapCount = run.actualRotationCount;
+    run.durationSec = durationSec;
+    run.validationDurationSec = durationSec;
+    run.durationSeconds = durationSec;
+    try {
+        run.timeMinutes = Math.round((Number(durationSec) / 60) * 1000) / 1000;
+    } catch (e) {
+        run.timeMinutes = durationSec / 60;
+    }
+    if (run.rpm == null) run.rpm = VALIDATION_TARGET_RPM;
+    return run;
+}
 var biometricEnabledSetting = true;
 var currentReportId = null;
 var currentReportData = null;
@@ -587,6 +630,19 @@ function submitApprovalVerifyModal() {
         }
         return;
     }
+    if (_approvalVerifyPurpose === 'export') {
+        var curUn = '';
+        if (window.currentUser) {
+            curUn = String(window.currentUser.username || window.currentUser.name || '').trim().toLowerCase();
+        }
+        if (curUn && username.toLowerCase() === curUn) {
+            if (errEl) {
+                errEl.textContent = 'You cannot approve your own export. Enter a different verifier.';
+                errEl.style.display = 'block';
+            }
+            return;
+        }
+    }
     apiRequest(API_BASE + '/api/data/auth/approval-verify', {
         method: 'POST',
         body: { method: 'credentials', username: username, password: password, purpose: _approvalVerifyPurpose }
@@ -985,7 +1041,7 @@ function guardReportPreviewNavigation(targetPage) {
     if (!isReportPreviewNavigationLocked(window._lastReportPreview)) return false;
     if (targetPage === 'report-preview') return false;
     showAppModal(
-        'This report is awaiting approval. Complete Pass/Fail and sign on this screen, or power off will save it as Aborted (power interruption).',
+        'This report is awaiting approval. Complete Pass/Fail and sign on this screen, or power off will save a completed test as Aborted (power interruption). Operator aborts stay Aborted.',
         'Report'
     );
     var active = document.querySelector('.page.active');
@@ -1052,12 +1108,25 @@ function unlockReportPreviewAfterServerStatus(preview, reportId, options) {
             showAppModal('Report has been approved. You may now print or leave this screen.', 'Report');
         }
     } else if (options.showModal !== false) {
-        showAppModal(
-            'This report was closed as Aborted (power interruption or restart) and can no longer be approved. You may leave this screen.',
-            'Report'
-        );
+        var closedMsg = isPowerInterruptionAbortPreview(preview)
+            ? 'This report was closed as Aborted (power interruption) and can no longer be approved. You may leave this screen.'
+            : 'This report was closed as Aborted and can no longer be approved. You may leave this screen.';
+        showAppModal(closedMsg, 'Report');
     }
     return true;
+}
+
+/** True when an aborted report was closed due to power loss (not operator Abort). */
+function isPowerInterruptionAbortPreview(preview) {
+    preview = preview || {};
+    var td = preview.testData || {};
+    var cause = String(preview.abortCause || td.abortCause || '').trim().toLowerCase();
+    if (cause === 'operator' || cause === 'user') return false;
+    if (cause === 'power_interruption' || cause === 'power_loss' || cause === 'power') return true;
+    var remarks = String(preview.approvalRemarks || preview.remarks || td.remarks || '').trim().toLowerCase();
+    if (remarks.indexOf('power interruption') >= 0) return true;
+    var by = String(preview.approvedBy || '').trim().toLowerCase();
+    return by.indexOf('power interruption') >= 0;
 }
 
 function refreshReportPreviewApprovalState(reportId) {
@@ -1366,6 +1435,18 @@ function _approvalVerifyModalOptionsForReport() {
         usernameLabelText: 'Username',
         usernamePlaceholder: 'Reviewer or Admin username',
         emptyCredentialsMessage: 'Enter username and password.'
+    };
+}
+
+/** Recipe disable: verifier needs recipe-manage (server purpose recipe_disable). */
+function _approvalVerifyModalOptionsForRecipeDisable() {
+    return {
+        purpose: 'recipe_disable',
+        titleText: 'Recipe disable approval',
+        subtitleText: 'Enter credentials of a user with recipe management permission.',
+        usernameLabelText: 'Verifier username',
+        usernamePlaceholder: 'Username',
+        emptyCredentialsMessage: 'Enter verifier username and password.'
     };
 }
 
@@ -2236,6 +2317,7 @@ function login() {
 function showPasswordExpiredResetScreen(username, oldPassword) {
     window._passwordResetScreenMode = 'expired';
     window._mandatoryPasswordResetPending = false;
+    _setPasswordResetCancelVisible(false);
     var titleEl = document.getElementById('password-reset-page-title');
     var subEl = document.getElementById('password-reset-page-subtitle');
     if (titleEl) titleEl.textContent = 'Reset Expired Password';
@@ -2271,6 +2353,7 @@ function showPasswordExpiredResetScreen(username, oldPassword) {
 function showMandatoryPasswordResetScreen(username) {
     window._passwordResetScreenMode = 'mandatory';
     window._mandatoryPasswordResetPending = true;
+    _setPasswordResetCancelVisible(false);
     var titleEl = document.getElementById('password-reset-page-title');
     var subEl = document.getElementById('password-reset-page-subtitle');
     if (titleEl) titleEl.textContent = 'Reset your password';
@@ -2305,6 +2388,95 @@ function showMandatoryPasswordResetScreen(username) {
     }, 60);
 }
 
+function _setPasswordResetCancelVisible(visible) {
+    var btn = document.getElementById('password-reset-cancel-btn');
+    if (btn) btn.style.display = visible ? '' : 'none';
+}
+
+function openProfilePasswordResetPage() {
+    var user = window.currentUser || {};
+    var username = String(user.username || user.name || '').trim();
+    if (!username) {
+        if (typeof showAppModal === 'function') showAppModal('No user logged in.', 'Change Password');
+        return;
+    }
+    var unUpper = username.toUpperCase();
+    if (unUpper === String(FACTORY_USERNAME || 'RLERLT').toUpperCase() || user.id === 0) {
+        if (typeof showAppModal === 'function') {
+            showAppModal('Factory account password cannot be changed here.', 'Change Password');
+        }
+        return;
+    }
+    window._passwordResetScreenMode = 'profile';
+    window._mandatoryPasswordResetPending = false;
+    _setPasswordResetCancelVisible(true);
+    var titleEl = document.getElementById('password-reset-page-title');
+    var subEl = document.getElementById('password-reset-page-subtitle');
+    if (titleEl) titleEl.textContent = 'Change Password';
+    if (subEl) subEl.textContent = 'Enter your current password and choose a new one.';
+    goToPage('password-expired-reset');
+    setTimeout(function () {
+        var userEl = document.getElementById('expired-reset-username');
+        var oldEl = document.getElementById('expired-reset-old-password');
+        var newEl = document.getElementById('expired-reset-new-password');
+        var confEl = document.getElementById('expired-reset-confirm-password');
+        if (userEl) userEl.value = username;
+        if (oldEl) oldEl.value = '';
+        if (newEl) newEl.value = '';
+        if (confEl) confEl.value = '';
+        if (oldEl && typeof oldEl.focus === 'function') oldEl.focus();
+    }, 60);
+}
+
+function cancelProfilePasswordReset() {
+    window._passwordResetScreenMode = null;
+    _setPasswordResetCancelVisible(false);
+    goToPage('user-profile');
+}
+
+function submitProfilePasswordChange() {
+    var userEl = document.getElementById('expired-reset-username');
+    var oldEl = document.getElementById('expired-reset-old-password');
+    var newEl = document.getElementById('expired-reset-new-password');
+    var confEl = document.getElementById('expired-reset-confirm-password');
+    var username = userEl ? String(userEl.value || '').trim() : '';
+    var oldPassword = oldEl ? String(oldEl.value || '') : '';
+    var newPassword = newEl ? String(newEl.value || '') : '';
+    var confirmPassword = confEl ? String(confEl.value || '') : '';
+
+    if (!username || !oldPassword || !newPassword || !confirmPassword) {
+        showAppModal('Enter current password, new password, and confirmation.', 'Change Password');
+        return;
+    }
+    if (newPassword !== confirmPassword) {
+        showAppModal('New password and confirmation do not match.', 'Change Password');
+        return;
+    }
+    if (oldPassword === newPassword) {
+        showAppModal('New password must be different from your current password.', 'Change Password');
+        return;
+    }
+    var passwordError = getStrongPasswordError(newPassword);
+    if (passwordError) {
+        showAppModal(passwordError, 'Change Password');
+        return;
+    }
+    apiRequest(API_BASE + '/api/data/auth/change-password', {
+        method: 'POST',
+        body: { oldPassword: oldPassword, newPassword: newPassword }
+    }).then(function () {
+        if (oldEl) oldEl.value = '';
+        if (newEl) newEl.value = '';
+        if (confEl) confEl.value = '';
+        window._passwordResetScreenMode = null;
+        _setPasswordResetCancelVisible(false);
+        showAppModal('Password updated.', 'Change Password');
+        goToPage('user-profile');
+    }).catch(function (err) {
+        showAppModal((err && err.message) ? err.message : 'Failed to change password.', 'Change Password');
+    });
+}
+
 function _restoreSidebarAndHeaderAfterExpiredReset() {
     var sidebar = document.querySelector('.app-container .sidebar');
     var header = document.querySelector('.app-container .app-header');
@@ -2323,6 +2495,8 @@ function _restoreSidebarAndHeaderAfterExpiredReset() {
 function submitPasswordResetFromLoginPage() {
     if (window._passwordResetScreenMode === 'mandatory') {
         submitMandatoryPasswordReset();
+    } else if (window._passwordResetScreenMode === 'profile') {
+        submitProfilePasswordChange();
     } else {
         submitExpiredPasswordReset();
     }
@@ -3302,13 +3476,162 @@ function _summariseExportResult(result) {
     return 'Export completed with no files written.';
 }
 
+/** USB export verify/retention modals (Tap Density style). */
+function showUsbExportVerifyModal(opts) {
+    opts = opts || {};
+    return new Promise(function (resolve) {
+        var overlay = document.getElementById('app-modal-overlay');
+        var titleEl = document.getElementById('app-modal-title');
+        var msgEl = document.getElementById('app-modal-message');
+        var buttonsEl = document.getElementById('app-modal-buttons');
+        if (!overlay || !titleEl || !msgEl || !buttonsEl) {
+            resolve(window.confirm(opts.fallbackConfirm || 'Was the export successful?'));
+            return;
+        }
+        appModalResolve = resolve;
+        titleEl.textContent = opts.title || 'Verify Export';
+        msgEl.textContent = opts.message || 'Verify the files on the USB pendrive.\n\nWas the export successful?';
+        buttonsEl.innerHTML = '';
+        var noBtn = document.createElement('button');
+        noBtn.type = 'button';
+        noBtn.className = 'btn-role-select btn-confirm-cancel';
+        noBtn.textContent = opts.noLabel || 'No — Export again';
+        noBtn.onclick = function () {
+            overlay.style.display = 'none';
+            if (appModalResolve) {
+                appModalResolve(false);
+                appModalResolve = null;
+            }
+        };
+        var yesBtn = document.createElement('button');
+        yesBtn.type = 'button';
+        yesBtn.className = 'btn-role-select btn-confirm-ok';
+        yesBtn.textContent = opts.yesLabel || 'Yes — Verified';
+        yesBtn.onclick = function () {
+            overlay.style.display = 'none';
+            if (appModalResolve) {
+                appModalResolve(true);
+                appModalResolve = null;
+            }
+        };
+        buttonsEl.appendChild(noBtn);
+        buttonsEl.appendChild(yesBtn);
+        overlay.style.display = 'flex';
+    });
+}
+
+function showUsbExportRetentionModal(opts) {
+    opts = opts || {};
+    return new Promise(function (resolve) {
+        var overlay = document.getElementById('app-modal-overlay');
+        var titleEl = document.getElementById('app-modal-title');
+        var msgEl = document.getElementById('app-modal-message');
+        var buttonsEl = document.getElementById('app-modal-buttons');
+        if (!overlay || !titleEl || !msgEl || !buttonsEl) {
+            window.alert(opts.message || 'Export verified.');
+            resolve(true);
+            return;
+        }
+        titleEl.textContent = opts.title || 'Export Verified';
+        msgEl.textContent = opts.message || 'Export verified successfully.';
+        buttonsEl.innerHTML = '';
+        var okBtn = document.createElement('button');
+        okBtn.type = 'button';
+        okBtn.className = 'btn-role-select btn-confirm-ok';
+        okBtn.textContent = 'OK';
+        okBtn.onclick = function () {
+            overlay.style.display = 'none';
+            resolve(true);
+        };
+        buttonsEl.appendChild(okBtn);
+        overlay.style.display = 'flex';
+    });
+}
+
+function showAuditExportVerifyModal() {
+    return showUsbExportVerifyModal({
+        title: 'Verify Audit Export',
+        message: 'Verify the PDF on the USB pendrive.\n\nWas the audit trail export successful?'
+    });
+}
+
+function showAuditExportRetentionModal(entriesScheduled) {
+    var n = parseInt(entriesScheduled, 10);
+    if (isNaN(n) || n < 0) n = 0;
+    return showUsbExportRetentionModal({
+        title: 'Audit Export Verified',
+        message:
+            'Export verified successfully.\n\n' +
+            'The ' + n + ' audit entries included in this export will be permanently removed from this device after 24 hours.\n\n' +
+            'Ensure your USB copy is complete and stored safely.'
+    });
+}
+
+function showReportExportVerifyModal() {
+    return showUsbExportVerifyModal({
+        title: 'Verify Report Export',
+        message: 'Verify the report PDF(s) on the USB pendrive.\n\nWas the report export successful?'
+    });
+}
+
+function showReportExportRetentionModal(reportsScheduled) {
+    var n = parseInt(reportsScheduled, 10);
+    if (isNaN(n) || n < 0) n = 0;
+    return showUsbExportRetentionModal({
+        title: 'Report Export Verified',
+        message:
+            'Export verified successfully.\n\n' +
+            'The ' + n + ' report(s) included in this export will be permanently removed from this device after 24 hours.\n\n' +
+            'Ensure your USB copy is complete and stored safely.'
+    });
+}
+
+function _confirmReportExportAfterUsb(evt, titleText) {
+    var exportId = evt && evt.export_id ? evt.export_id : '';
+    showReportExportVerifyModal().then(function (verified) {
+        if (!verified) {
+            showAppModal(
+                'Export not verified. Check the USB pendrive and use Export Reports again when ready.\n\nNo data will be erased until you confirm a successful export.',
+                titleText
+            );
+            return;
+        }
+        if (!exportId) {
+            showAppModal('Could not confirm export (missing session). Please export again.', titleText);
+            return;
+        }
+        showLoadingOverlay(titleText, 'Confirming export...', { cancellable: false });
+        apiRequest(API_BASE + '/api/reports/export/confirm', {
+            method: 'POST',
+            body: { export_id: exportId, verified: true }
+        }).then(function (confirmRes) {
+            hideLoadingOverlay();
+            if (confirmRes && confirmRes.success && confirmRes.scheduled) {
+                showReportExportRetentionModal(confirmRes.reports_scheduled).then(function () {
+                    if (typeof loadReports === 'function') {
+                        loadReports(typeof currentReportFilter !== 'undefined' ? currentReportFilter : null);
+                    }
+                });
+            } else {
+                showAppModal(
+                    _friendlyExportError((confirmRes && confirmRes.error) || 'Could not schedule retention'),
+                    titleText
+                );
+            }
+        }).catch(function (confirmErr) {
+            hideLoadingOverlay();
+            showAppModal(_friendlyExportError(confirmErr), titleText);
+        });
+    });
+}
+
 function _ensureExportApprovalToken() {
     var role = typeof getCurrentRole === 'function' ? String(getCurrentRole() || '').toLowerCase() : '';
     if (role === 'factory') return Promise.resolve('');
     return openApprovalVerifyModal({
         purpose: 'export',
         titleText: 'Export approval',
-        subtitleText: 'Enter credentials of a user with export approval permission.',
+        subtitleText: 'Enter credentials of a different user with export approval permission. You cannot approve your own export.',
         usernameLabelText: 'Verifier username',
         usernamePlaceholder: 'Username',
         emptyCredentialsMessage: 'Enter verifier username and password.'
@@ -3468,7 +3791,9 @@ function _handleExportEvent(evt, titleText) {
         // Brief flash at 100% so the user sees completion, then hide.
         setTimeout(function () {
             hideLoadingOverlay();
-            if (evt.ok) {
+            if (evt.ok && evt.export_id) {
+                _confirmReportExportAfterUsb(evt, titleText);
+            } else if (evt.ok) {
                 showAppModal(_summariseExportResult(evt), titleText);
             } else {
                 showAppModal(
@@ -4607,18 +4932,15 @@ function setValidationDrumSpinning(spinning) {
 
 function initValidationRunPage() {
     lastValidationType = 'usp';
-    validationRunTarget = 100;
-    validationRunTolerance = 1;
-    validationRunMin = 99;
-    validationRunMax = 101;
+    _recomputeValidationExpectedRotations();
 
     setValRunEl('val-run-usp', 'USP');
-    setValRunEl('val-run-rpm', '25');
+    setValRunEl('val-run-rpm', String(VALIDATION_TARGET_RPM));
     setValRunEl('val-run-set-time', '04:00');
-    setValRunEl('val-run-expected', '100 (±1)');
+    setValRunEl('val-run-expected', validationRunTarget + ' (±' + validationRunTolerance + ')');
     setValRunEl('val-run-rotation-count', '0');
     setValRunEl('val-run-current-rpm', '--');
-    setValRunEl('val-run-rpm-sub', '25 ±1');
+    setValRunEl('val-run-rpm-sub', VALIDATION_TARGET_RPM + ' ±1');
     setValRunEl('val-drum-timer', '00:00');
     setValRunEl('val-run-status', 'Ready');
     setValRunEl('val-run-status-sub', 'Press Start to begin');
@@ -5092,7 +5414,42 @@ function exportAuditTrails() {
                             setLoadingProgress(100, 'Export complete', '');
                             setTimeout(function () {
                                 hideLoadingOverlay();
-                                showAppModal('Audit trail export successful.', titleText);
+                                var exportId = res.export_id || '';
+                                showAuditExportVerifyModal().then(function (verified) {
+                                    if (!verified) {
+                                        showAppModal(
+                                            'Export not verified. Check the USB pendrive and use Export Audit Trails again when ready.\n\nNo data will be erased until you confirm a successful export.',
+                                            titleText
+                                        );
+                                        return;
+                                    }
+                                    if (!exportId) {
+                                        showAppModal('Could not confirm export (missing session). Please export again.', titleText);
+                                        return;
+                                    }
+                                    showLoadingOverlay(titleText, 'Confirming export...', { cancellable: false });
+                                    apiRequest(API_BASE + '/api/audit/export/confirm', {
+                                        method: 'POST',
+                                        body: { export_id: exportId, verified: true }
+                                    }).then(function (confirmRes) {
+                                        hideLoadingOverlay();
+                                        if (confirmRes && confirmRes.success && confirmRes.scheduled) {
+                                            showAuditExportRetentionModal(confirmRes.entries_scheduled).then(function () {
+                                                if (typeof applyAuditFiltersAndRefresh === 'function') {
+                                                    applyAuditFiltersAndRefresh();
+                                                }
+                                            });
+                                        } else {
+                                            showAppModal(
+                                                _friendlyExportError((confirmRes && confirmRes.error) || 'Could not schedule retention'),
+                                                titleText
+                                            );
+                                        }
+                                    }).catch(function (confirmErr) {
+                                        hideLoadingOverlay();
+                                        showAppModal(_friendlyExportError(confirmErr), titleText);
+                                    });
+                                });
                             }, 350);
                         }, 250);
                     } else {
@@ -6167,7 +6524,8 @@ function _trSetButtons(state) {
     var stop = _trEl('tr-stop-btn');
     var dispense = _trEl('tr-dispense-btn');
     if (!start || !pause || !resume || !stop) return;
-    if (state !== 'dispensing') stop.disabled = false;
+    // Abort greyed until Initialize is pressed; stay disabled during dispense.
+    stop.disabled = (state === 'idle' || state === 'dispensing');
     if (state === 'idle') {
         start.style.display = ''; pause.style.display = 'none'; resume.style.display = 'none';
         stop.style.display = ''; start.disabled = false;
@@ -6969,7 +7327,8 @@ function _trBuildCompletionReportPayload(opts) {
         createdAt: nowIso,
         completedAt: nowIso,
         recipe: recipe,
-        remarks: (isAborted ? 'Aborted run. ' : '') + 'Mode: ' + modeLabel + ', Target: ' + targetLabel,
+        remarks: '',
+        abortCause: isAborted ? 'operator' : undefined,
         testData: {
             recipe: recipe,
             productName: recipe.productName || recipe.name || '--',
@@ -6978,6 +7337,7 @@ function _trBuildCompletionReportPayload(opts) {
             batchNumber1: _tr.batchNumber1,
             batchNumber2: _tr.drumCount === 2 ? _tr.batchNumber2 : null,
             speed: _tr.rpm,
+            rpm: _tr.rpm,
             mode: modeLabel,
             target: targetLabel,
             durationSeconds: _tr.elapsedSeconds,
@@ -6986,6 +7346,7 @@ function _trBuildCompletionReportPayload(opts) {
             stepCount: _tr.drumCount,
             completedSteps: isAborted ? 0 : _tr.drumCount,
             status: isAborted ? 'aborted' : 'completed',
+            abortCause: isAborted ? 'operator' : undefined,
             rotationCount: _tr.rotationCount,
             targetRotations: _tr.targetRotations,
             targetSeconds: _tr.targetSeconds,
@@ -7091,7 +7452,7 @@ function confirmRecipeAction(action) {
     if (action === 'edit') {
         editRecipe(id);
     } else if (action === 'disable') {
-        disableRecipe(id);
+        openRecipeDisableModal(id);
     } else if (action === 'approve') {
         openRecipeApproveModal(id);
     }
@@ -7219,8 +7580,58 @@ function loadRecipeForEdit() {
     }).catch(function () {});
 }
 
-function disableRecipe(id) {
-    apiRequest(API_BASE + '/api/data/recipes/' + id, { method: 'DELETE' }).then(function () {
+function openRecipeDisableModal(recipeId) {
+    window._recipeDisableId = recipeId;
+    var ta = document.getElementById('recipe-disable-remarks');
+    if (ta) ta.value = '';
+    var overlay = document.getElementById('recipe-disable-overlay');
+    if (overlay) overlay.style.display = 'flex';
+}
+
+function closeRecipeDisableModal() {
+    window._recipeDisableId = null;
+    var overlay = document.getElementById('recipe-disable-overlay');
+    if (overlay) overlay.style.display = 'none';
+}
+
+function submitRecipeDisable() {
+    var id = window._recipeDisableId;
+    if (id == null) return;
+    var ta = document.getElementById('recipe-disable-remarks');
+    var remarks = ta ? String(ta.value || '').trim() : '';
+    var role = typeof getCurrentRole === 'function' ? String(getCurrentRole() || '').toLowerCase() : '';
+
+    var runDisable = function (token) {
+        return disableRecipe(id, { remarks: remarks, token: token || '' }).then(function () {
+            closeRecipeDisableModal();
+        });
+    };
+
+    var chain;
+    if (role === 'factory') {
+        chain = runDisable('');
+    } else {
+        chain = openApprovalVerifyModal(_approvalVerifyModalOptionsForRecipeDisable()).then(function (token) {
+            if (!token) return null;
+            return runDisable(token);
+        });
+    }
+    chain.catch(function (err) {
+        var msg = (err && err.message) ? err.message : 'Failed to disable recipe.';
+        showAppModal(msg, 'Disable Recipe');
+    });
+}
+
+function disableRecipe(id, opts) {
+    opts = opts || {};
+    var remarks = opts.remarks != null ? String(opts.remarks).trim() : '';
+    var token = opts.token != null ? String(opts.token) : '';
+    var headers = token ? { 'X-Approval-Verify-Token': token } : {};
+    return apiRequest(API_BASE + '/api/data/recipes/' + id, {
+        method: 'DELETE',
+        headers: headers,
+        body: { remarks: remarks }
+    }).then(function () {
         try {
             // Keep a local list of disabled recipes so the Disable page only shows those
             var disabled = [];
@@ -7256,9 +7667,6 @@ function disableRecipe(id) {
 
         loadManageRecipes();
         showAppModal('Recipe disabled.', 'Disable Recipe');
-    }).catch(function (err) {
-        var msg = (err && err.message) ? err.message : 'Failed to disable recipe.';
-        showAppModal(msg, 'Disable Recipe');
     });
 }
 
@@ -7909,7 +8317,7 @@ function _buildValidationInProgressCheckpointPayload() {
     var elapsed = VALIDATION_RUN_DURATION_SEC - (validationRunSecondsRemaining || 0);
     if (elapsed < 0) elapsed = 0;
     var now = (typeof formatLocalWallClockIso === 'function') ? formatLocalWallClockIso() : new Date().toISOString();
-    var run = {
+    var run = _enrichValidationRunFields({
         validationSubtype: 'usp',
         usp: 'USP',
         rpm: VALIDATION_TARGET_RPM,
@@ -7921,7 +8329,7 @@ function _buildValidationInProgressCheckpointPayload() {
         actualRotationCount: validationRunCurrentCount,
         status: 'Running',
         completedAt: now
-    };
+    });
     var user = window.currentUser || {};
     return {
         name: 'Validation - USP - In Progress',
@@ -7933,10 +8341,14 @@ function _buildValidationInProgressCheckpointPayload() {
         rpm: run.rpm,
         durationSec: run.durationSec,
         expectedRotationCount: run.expectedRotationCount,
+        expectedTapCount: run.expectedTapCount,
         expectedTolerance: run.expectedTolerance,
         expectedRotationCountMin: run.expectedRotationCountMin,
         expectedRotationCountMax: run.expectedRotationCountMax,
         actualRotationCount: run.actualRotationCount,
+        actualTapCount: run.actualTapCount,
+        validationStartTime: run.validationStartTime,
+        testStartTime: run.testStartTime,
         createdAt: now,
         completedAt: now,
         operatedByUsername: normalizeReportUsername(user.username || user.name || ''),
@@ -7948,7 +8360,13 @@ function _buildValidationInProgressCheckpointPayload() {
             rpm: run.rpm,
             status: 'Running',
             actualRotationCount: run.actualRotationCount,
+            actualTapCount: run.actualTapCount,
             expectedRotationCount: run.expectedRotationCount,
+            expectedTapCount: run.expectedTapCount,
+            validationStartTime: run.validationStartTime,
+            testStartTime: run.testStartTime,
+            durationSec: run.durationSec,
+            validationDurationSec: run.validationDurationSec,
             drumCount: 1
         }
     };
@@ -7993,10 +8411,10 @@ function _syncValidationRunCheckpoint(extra) {
 
 function buildValidationRunSnapshot(isPass) {
     var now = (typeof formatLocalWallClockIso === 'function') ? formatLocalWallClockIso() : new Date().toISOString();
-    return {
+    return _enrichValidationRunFields({
         validationSubtype: 'usp',
         usp: 'USP',
-        rpm: 25,
+        rpm: VALIDATION_TARGET_RPM,
         durationSec: VALIDATION_RUN_DURATION_SEC,
         expectedRotationCount: validationRunTarget,
         expectedTolerance: validationRunTolerance,
@@ -8005,7 +8423,7 @@ function buildValidationRunSnapshot(isPass) {
         actualRotationCount: validationRunCurrentCount,
         status: isPass ? 'Pass' : 'Fail',
         completedAt: now
-    };
+    });
 }
 
 function getOrderedValidationSessionRuns() {
@@ -8015,7 +8433,9 @@ function getOrderedValidationSessionRuns() {
 }
 
 function buildCombinedValidationReportPayload() {
-    var runs = getOrderedValidationSessionRuns();
+    var runs = getOrderedValidationSessionRuns().map(function (r) {
+        return _enrichValidationRunFields(Object.assign({}, r));
+    });
     if (!runs.length) return null;
     var run = runs[0];
     var isPass = String(run.status || '').toLowerCase() === 'pass';
@@ -8031,10 +8451,14 @@ function buildCombinedValidationReportPayload() {
         rpm: run.rpm,
         durationSec: run.durationSec,
         expectedRotationCount: run.expectedRotationCount,
+        expectedTapCount: run.expectedTapCount,
         expectedTolerance: run.expectedTolerance,
         expectedRotationCountMin: run.expectedRotationCountMin,
         expectedRotationCountMax: run.expectedRotationCountMax,
         actualRotationCount: run.actualRotationCount,
+        actualTapCount: run.actualTapCount,
+        validationStartTime: run.validationStartTime,
+        testStartTime: run.testStartTime,
         createdAt: now,
         completedAt: now,
         operatedByUsername: normalizeReportUsername(user.username || user.name || ''),
@@ -8046,7 +8470,13 @@ function buildCombinedValidationReportPayload() {
             rpm: run.rpm,
             status: isPass ? 'Pass' : 'Fail',
             actualRotationCount: run.actualRotationCount,
+            actualTapCount: run.actualTapCount,
             expectedRotationCount: run.expectedRotationCount,
+            expectedTapCount: run.expectedTapCount,
+            validationStartTime: run.validationStartTime,
+            testStartTime: run.testStartTime,
+            durationSec: run.durationSec,
+            validationDurationSec: run.validationDurationSec,
             drumCount: 1
         }
     };
@@ -8056,7 +8486,7 @@ function buildValidationAbortedRunSnapshot() {
     var elapsed = VALIDATION_RUN_DURATION_SEC - (validationRunSecondsRemaining || 0);
     if (elapsed < 0) elapsed = 0;
     var now = (typeof formatLocalWallClockIso === 'function') ? formatLocalWallClockIso() : new Date().toISOString();
-    return {
+    return _enrichValidationRunFields({
         validationSubtype: 'usp',
         usp: 'USP',
         rpm: VALIDATION_TARGET_RPM,
@@ -8068,7 +8498,7 @@ function buildValidationAbortedRunSnapshot() {
         actualRotationCount: validationRunCurrentCount,
         status: 'Aborted',
         completedAt: now
-    };
+    });
 }
 
 function buildAbortedValidationReportPayload() {
@@ -8085,23 +8515,35 @@ function buildAbortedValidationReportPayload() {
         rpm: run.rpm,
         durationSec: run.durationSec,
         expectedRotationCount: run.expectedRotationCount,
+        expectedTapCount: run.expectedTapCount,
         expectedTolerance: run.expectedTolerance,
         expectedRotationCountMin: run.expectedRotationCountMin,
         expectedRotationCountMax: run.expectedRotationCountMax,
         actualRotationCount: run.actualRotationCount,
+        actualTapCount: run.actualTapCount,
+        validationStartTime: run.validationStartTime,
+        testStartTime: run.testStartTime,
         createdAt: now,
         completedAt: now,
         operatedByUsername: normalizeReportUsername(user.username || user.name || ''),
         operatorName: user.name || user.username || '--',
         employeeId: user.username || '--',
-        remarks: 'Aborted validation run.',
+        remarks: '',
+        abortCause: 'operator',
         testData: {
             validationRuns: [run],
             usp: 'USP',
             rpm: run.rpm,
             status: 'Aborted',
+            abortCause: 'operator',
             actualRotationCount: run.actualRotationCount,
+            actualTapCount: run.actualTapCount,
             expectedRotationCount: run.expectedRotationCount,
+            expectedTapCount: run.expectedTapCount,
+            validationStartTime: run.validationStartTime,
+            testStartTime: run.testStartTime,
+            durationSec: run.durationSec,
+            validationDurationSec: run.validationDurationSec,
             drumCount: 1
         }
     };
@@ -8916,16 +9358,7 @@ function backToMemberAfterBiometric() {
 
 function saveUserProfile() {
     var fullNameEl = document.getElementById('profile-fullname');
-    var passwordEl = document.getElementById('profile-password');
     var newName = fullNameEl ? (fullNameEl.value || '').trim() : '';
-    var newPassword = passwordEl ? (passwordEl.value || '') : '';
-    if (newPassword) {
-        var profilePasswordError = getStrongPasswordError(newPassword);
-        if (profilePasswordError) {
-            if (typeof showAppModal === 'function') showAppModal(profilePasswordError, 'User Profile');
-            return;
-        }
-    }
 
     var user = (typeof window.currentUser !== 'undefined' && window.currentUser) ? window.currentUser : (typeof currentUser !== 'undefined' && currentUser) ? currentUser : null;
     if (!user) {
@@ -8946,23 +9379,18 @@ function saveUserProfile() {
 
     if (isFactory) {
         updateLocalName(newName || user.name || user.username || 'Factory');
-        if (passwordEl) passwordEl.value = '';
         if (typeof showAppModal === 'function') showAppModal('Profile updated.', 'User Profile');
         return;
     }
 
-    var payload = {};
-    if (newName) payload.name = newName;
-    if (newPassword) payload.password = newPassword;
-    if (!payload.name && !payload.password) {
+    if (!newName) {
         if (typeof showAppModal === 'function') {
-            showAppModal('Enter a new full name and/or password to save.', 'User Profile');
+            showAppModal('Enter a new full name to save. Use Edit Password to change your password.', 'User Profile');
         }
         return;
     }
-    if (!payload.name) {
-        payload.name = (user.name || user.username || '').trim();
-    }
+
+    var payload = { name: newName };
 
     apiRequest(API_BASE + '/api/data/auth/profile', {
         method: 'PUT',
@@ -8972,7 +9400,6 @@ function saveUserProfile() {
             var updated = (result && result.member) ? result.member : result;
             var nameToSet = (updated && updated.name) ? updated.name : newName;
             updateLocalName(nameToSet || newName || (user.name || user.username));
-            if (passwordEl) passwordEl.value = '';
             if (typeof showAppModal === 'function') showAppModal('Profile updated.', 'User Profile');
         })
         .catch(function (err) {
@@ -9363,10 +9790,17 @@ function showFactoryResetConfirm() {
         apiRequest((API_BASE || '') + '/api/data/factory-reset', { method: 'POST', body: {} })
             .then(function (result) {
                 clearClientStateAfterFactoryReset();
-                showAppModal(
-                    'Factory reset completed. All reports, recipes, users, and audit trails have been erased.',
-                    'Factory Reset'
-                );
+                var msg = 'Factory reset completed. All reports, recipes, users, and audit trails have been erased.';
+                if (result && result.auditRowsRemaining > 0) {
+                    msg += ' Warning: some audit rows could not be removed.';
+                }
+                if (result && result.biometricTemplatesCleared === false) {
+                    msg += ' Warning: fingerprint templates may still be present on the sensor.';
+                    if (result.biometricError) {
+                        msg += ' ' + result.biometricError;
+                    }
+                }
+                showAppModal(msg, 'Factory Reset');
                 if (typeof showLoginScreen === 'function') showLoginScreen();
             })
             .catch(function (err) {

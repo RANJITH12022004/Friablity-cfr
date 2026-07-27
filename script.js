@@ -1567,6 +1567,7 @@ var PAGE_AUDIT_LABELS = {
     datetime: 'Date and Time',
     'factory-settings': 'Factory Settings',
     reports: 'Reports',
+    audits: 'Audits',
     'report-preview': 'Report Preview',
     'user-profile': 'User Profile',
     'view-recipes': 'View Recipe',
@@ -1609,23 +1610,31 @@ function auditPageLabel(pageName) {
     return pageName;
 }
 
+function _auditEffectivePageName(pageName) {
+    if (pageName === 'reports' && typeof currentReportFilter !== 'undefined' && currentReportFilter === 'audit') {
+        return 'audits';
+    }
+    return pageName;
+}
+
 function auditNavPageChange(newPage) {
-    if (_auditSkipPages[newPage]) {
+    var effectivePage = _auditEffectivePageName(newPage);
+    if (_auditSkipPages[effectivePage] || _auditSkipPages[newPage]) {
         _auditActivePage = null;
         return;
     }
-    if (newPage === _auditActivePage) return;
+    if (effectivePage === _auditActivePage) return;
     var prev = _auditActivePage;
-    _auditActivePage = newPage;
+    _auditActivePage = effectivePage;
     if (prev && !_auditSkipPages[prev]) {
         logAuditEvent('Exited screen', auditPageLabel(prev), { eventType: 'navigation' });
     }
-    if (newPage === 'usp1-detail') {
+    if (effectivePage === 'usp1-detail') {
         logAuditEvent('Entered USP 1 validation', 'USP 1 validation screen', { eventType: 'navigation' });
-    } else if (newPage === 'usp2-detail') {
+    } else if (effectivePage === 'usp2-detail') {
         logAuditEvent('Entered USP 2 validation', 'USP 2 validation screen', { eventType: 'navigation' });
     } else {
-        logAuditEvent('Entered screen', auditPageLabel(newPage), { eventType: 'navigation' });
+        logAuditEvent('Entered screen', auditPageLabel(effectivePage), { eventType: 'navigation' });
     }
 }
 
@@ -5325,7 +5334,22 @@ function filterReports(type) {
         showAppModal("You Don't Have Access to Audit Trail", 'Audit');
         return;
     }
+    var wasAudit = currentReportFilter === 'audit';
+    var willAudit = type === 'audit';
     loadReports(type);
+    if (wasAudit === willAudit) return;
+    if (wasAudit) {
+        logAuditEvent('Exited screen', 'Audits', { eventType: 'navigation' });
+    } else if (_auditActivePage === 'reports') {
+        logAuditEvent('Exited screen', 'Reports', { eventType: 'navigation' });
+    }
+    if (willAudit) {
+        logAuditEvent('Entered screen', 'Audits', { eventType: 'navigation' });
+        _auditActivePage = 'audits';
+    } else {
+        logAuditEvent('Entered screen', 'Reports', { eventType: 'navigation' });
+        _auditActivePage = 'reports';
+    }
 }
 
 function applyAuditFiltersAndRefresh() {

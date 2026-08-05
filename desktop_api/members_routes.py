@@ -188,6 +188,8 @@ def register_members_routes(bp, kiosk):
                 )
                 return jsonify({"error": verify_err}), 403
             before_member = dict(member)
+            disabled_by = str(user.get("username") or user.get("name") or "--").strip() or "--"
+            disabled_user = str(member.get("username") or member.get("name") or "--").strip() or "--"
             template_id = member.get("fingerprintTemplateId")
             if template_id is not None:
                 try:
@@ -233,7 +235,7 @@ def register_members_routes(bp, kiosk):
                 entity_type="member",
                 entity_id=member_id,
                 entity_name=member.get("username") or member.get("name") or "",
-                details="Member disabled",
+                details="{} disabled {}".format(disabled_by, disabled_user),
                 target_user=member.get("username") or "",
                 before=before_member,
                 after=member,
@@ -242,7 +244,11 @@ def register_members_routes(bp, kiosk):
                     "username": verified.get("username"),
                     "role": verified.get("role"),
                 },
-                extra={"templateIdFreed": template_id},
+                extra={
+                    "templateIdFreed": template_id,
+                    "disabledBy": disabled_by,
+                    "disabledUser": disabled_user,
+                },
             )
             return jsonify({"success": True, "member": member}), 200
         except ValueError as e:

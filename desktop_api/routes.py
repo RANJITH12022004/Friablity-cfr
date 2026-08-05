@@ -139,15 +139,21 @@ def create_blueprint(kiosk):
     audit_event = getattr(kiosk, "_audit_event", None)
     audit_log = getattr(kiosk, "_audit", None)
 
-    def log_audit(user, action, details):
+    def log_audit(user, action, details, *, outcome="success", extra=None):
         if audit_event:
             audit_event(
                 action=action,
-                outcome="success",
+                outcome=outcome,
                 entity_type="desktop",
                 entity_name="desktop",
                 details=details,
                 target_user=user.get("username") or user.get("name"),
+                actor_override={
+                    "user": user.get("username") or user.get("name") or "--",
+                    "role": user.get("role") or "--",
+                    "name": user.get("name") or user.get("username") or "--",
+                },
+                extra=extra,
             )
         elif audit_log:
             audit_log(user.get("username") or user.get("name"), user.get("role"), action, details)
@@ -204,10 +210,61 @@ def create_blueprint(kiosk):
             member = data_service.get_member_by_username(username)
             if member:
                 status = str(member.get("status") or "active").strip().lower()
+                attempted_user = {
+                    "username": member.get("username") or username,
+                    "name": member.get("name") or member.get("username") or username,
+                    "role": member.get("role") or "--",
+                }
                 if status == "disabled":
+                    log_audit(
+                        attempted_user,
+                        "Desktop login",
+                        "{} disabled account tried to login".format(attempted_user["username"]),
+                        outcome="denied",
+                        extra={"accountStatus": "disabled"},
+                    )
                     return jsonify({"error": "Account disabled by admin."}), 403
+                if status == "locked":
+                    log_audit(
+                        attempted_user,
+                        "Desktop login",
+                        "{} locked account tried to login".format(attempted_user["username"]),
+                        outcome="denied",
+                        extra={"accountStatus": "locked"},
+                    )
+                    return jsonify({"error": "Account locked. Contact admin."}), 403
             user = data_service.authenticate_user(username, password)
             if not user:
+                updated = data_service.record_failed_login(username)
+                if updated:
+                    try:
+                        failed_attempt = int(updated.get("failedAttempts") or 0)
+                    except (TypeError, ValueError):
+                        failed_attempt = 0
+                    attempted_user = {
+                        "username": updated.get("username") or username,
+                        "name": updated.get("name") or updated.get("username") or username,
+                        "role": updated.get("role") or "--",
+                    }
+                    log_audit(
+                        attempted_user,
+                        "Desktop login",
+                        "Wrong password attempt {}/3 for {}".format(
+                            min(failed_attempt, 3), attempted_user["username"]
+                        ),
+                        outcome="denied",
+                        extra={"failedAttempt": failed_attempt, "maximumAttempts": 3},
+                    )
+                    if str(updated.get("status") or "").strip().lower() == "locked":
+                        return jsonify({
+                            "error": "Account locked. Contact admin.",
+                            "remainingAttempts": 0,
+                        }), 403
+                    body = {
+                        "error": "Invalid username or password.",
+                        "remainingAttempts": max(0, 3 - failed_attempt),
+                    }
+                    return jsonify(body), 401
                 body = {"error": "Invalid username or password."}
                 return jsonify(body), 401
             if username.upper() != data_service.FACTORY_USERNAME.upper():
@@ -217,11 +274,6 @@ def create_blueprint(kiosk):
                     if bool(expiry.get("expired")):
                         return jsonify({"error": "Password expired. Reset required.", "passwordExpired": True, "expiry": expiry}), 403
             data_service.record_successful_login(username)
-            member_after = data_service.get_member_by_username(username)
-            if member_after and str(member_after.get("status") or "").strip().lower() == "locked":
-                member_after["status"] = "active"
-                member_after["failedAttempts"] = 0
-                data_service._save_member_record(member_after)
             token, safe_user = auth_store.issue_token(user)
             log_audit(safe_user, "Desktop login", "Desktop user logged in: {}".format(username))
             return jsonify({"success": True, "token": token, "user": safe_user}), 200

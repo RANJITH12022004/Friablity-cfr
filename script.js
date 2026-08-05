@@ -1923,6 +1923,11 @@ function updateSettingsVisibility() {
         disableCard.style.display = show ? '' : 'none';
     }
     showIf('.settings-validation', 'validation-test');
+    var auditExportCard = document.getElementById('export-audit-trails-card');
+    if (auditExportCard) {
+        var canAudit = (typeof canViewAuditLog === 'function' && canViewAuditLog()) || rl === 'factory';
+        auditExportCard.style.display = canAudit ? '' : 'none';
+    }
     var factoryCard = document.querySelector('.settings-factory');
     if (factoryCard) {
         factoryCard.style.display = rl === 'factory' ? '' : 'none';
@@ -1965,6 +1970,7 @@ function refreshShellAccessVisibility() {
     if (mp) mp.style.display = u && typeof canAccess === 'function' && canAccess(u, 'user-manage') ? '' : 'none';
     if (am) am.style.display = u && typeof canAccess === 'function' && canAccess(u, 'user-add') ? '' : 'none';
     if (typeof refreshReportsActionButtons === 'function') refreshReportsActionButtons();
+    if (typeof initAuditReportsVisibility === 'function') initAuditReportsVisibility();
     if (typeof updateSettingsVisibility === 'function') updateSettingsVisibility();
 }
 
@@ -5324,9 +5330,9 @@ function canViewAuditLog() {
 
 function initAuditReportsVisibility() {
     var auditBtn = document.querySelector('.reports-filter-audit');
-    if (auditBtn && !canViewAuditLog()) {
-        auditBtn.style.display = 'none';
-    }
+    if (!auditBtn) return;
+    // Must show again after a prior non-audit user hid the button in this SPA session.
+    auditBtn.style.display = canViewAuditLog() ? '' : 'none';
 }
 
 function filterReports(type) {

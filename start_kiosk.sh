@@ -9,11 +9,12 @@ cd "$APP_ROOT"
 PYTHON="${PYTHON:-/opt/kiosk/venv/bin/python3}"
 LOG="${KIOSK_LOG:-$HOME/kiosk_bridge.log}"
 
-# Start bridge backend
-nohup env APP_ROOT="$APP_ROOT" PYTHONUNBUFFERED=1 "$PYTHON" "$APP_ROOT/bridge.py" >> "$LOG" 2>&1 &
-
-# Give backend a moment to start
-sleep 2
+# Start bridge backend only when systemd is not already managing it.
+# Running a second bridge.py races for port 5000 and causes white "cannot reach" pages after power cycles.
+if ! systemctl is-active --quiet kiosk-bridge.service 2>/dev/null; then
+  nohup env APP_ROOT="$APP_ROOT" PYTHONUNBUFFERED=1 "$PYTHON" "$APP_ROOT/bridge.py" >> "$LOG" 2>&1 &
+  sleep 2
+fi
 
 # Start Chromium in kiosk mode (if X is available)
 if [ -x "$APP_ROOT/scripts/launch_chromium_kiosk.sh" ]; then

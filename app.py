@@ -245,8 +245,14 @@ def _audit_event(
     signature=None,
     event_type="compliance",
     extra=None,
+    actor_override=None,
 ):
-    actor = _audit_actor()
+    actor = dict(actor_override or _audit_actor())
+    actor_user = str(actor.get("user") or actor.get("username") or actor.get("name") or "--").strip() or "--"
+    actor_role = str(actor.get("role") or "--").strip() or "--"
+    actor["user"] = actor_user
+    actor["role"] = actor_role
+    actor["name"] = str(actor.get("name") or actor_user).strip() or actor_user
     audit_time = _audit_time_fields()
     signature = signature or {}
     before_clean = _sanitize_audit_payload(before)
@@ -2197,6 +2203,9 @@ def delete_member(member_id):
             )
             return jsonify({"error": verify_err}), 403
         before_member = dict(member)
+        cur = data_service.get_current_user() or {}
+        disabled_by = str(cur.get("username") or cur.get("name") or "--").strip() or "--"
+        disabled_user = str(member.get("username") or member.get("name") or "--").strip() or "--"
         template_id = member.get("fingerprintTemplateId")
         if template_id is not None:
             deleted = biometric_service.delete_template(template_id)
@@ -2225,12 +2234,16 @@ def delete_member(member_id):
             entity_type="member",
             entity_id=member_id,
             entity_name=member.get("username") or member.get("name") or "",
-            details="Member disabled",
+            details="{} disabled {}".format(disabled_by, disabled_user),
             target_user=member.get("username") or "",
             before=before_member,
             after=member,
             signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
-            extra={"templateIdFreed": template_id},
+            extra={
+                "templateIdFreed": template_id,
+                "disabledBy": disabled_by,
+                "disabledUser": disabled_user,
+            },
         )
         return jsonify({"success": True, "member": member}), 200
     except ValueError as e:
@@ -2464,11 +2477,35 @@ def login():
         member = data_service.get_member_by_username(username)
         if member:
             status = str(member.get("status") or "active").strip().lower()
+            attempted_username = str(member.get("username") or username or "--").strip() or "--"
+            attempted_actor = {
+                "user": attempted_username,
+                "role": str(member.get("role") or "--").strip() or "--",
+                "name": member.get("name") or attempted_username,
+            }
             if status == "locked":
-                _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details="Account locked", target_user=username)
+                _audit_event(
+                    action="Login",
+                    outcome="denied",
+                    entity_type="session",
+                    entity_name="password",
+                    details="{} locked account tried to login".format(attempted_username),
+                    target_user=attempted_username,
+                    actor_override=attempted_actor,
+                    extra={"accountStatus": "locked"},
+                )
                 return jsonify({"error": "Account locked. Contact admin."}), 403
             if status == "disabled":
-                _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details="Account disabled", target_user=username)
+                _audit_event(
+                    action="Login",
+                    outcome="denied",
+                    entity_type="session",
+                    entity_name="password",
+                    details="{} disabled account tried to login".format(attempted_username),
+                    target_user=attempted_username,
+                    actor_override=attempted_actor,
+                    extra={"accountStatus": "disabled"},
+                )
                 return jsonify({"error": "Account disabled by admin."}), 403
 
         # Try authenticate
@@ -2534,9 +2571,24 @@ def login():
             except (TypeError, ValueError):
                 fa = 0
             remaining = max(0, 3 - fa)
+            attempted_username = str(updated.get("username") or username or "--").strip() or "--"
+            attempted_role = str(updated.get("role") or "--").strip() or "--"
+            _audit_event(
+                action="Login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="password",
+                details="Wrong password attempt {}/3 for {}".format(min(fa, 3), attempted_username),
+                target_user=attempted_username,
+                actor_override={
+                    "user": attempted_username,
+                    "role": attempted_role,
+                    "name": updated.get("name") or attempted_username,
+                },
+                extra={"failedAttempt": fa, "maximumAttempts": 3},
+            )
             # If this attempt caused the account to become locked, show lockout immediately
             if status == "locked":
-                _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details="Account locked after failed attempts", target_user=username)
                 return jsonify({
                     "error": "Account locked. Contact admin.",
                     "remainingAttempts": 0

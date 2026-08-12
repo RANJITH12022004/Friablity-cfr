@@ -199,13 +199,13 @@ def _report_print_timestamp() -> Dict[str, str]:
 
         payload = rtc_service.get_device_wall_datetime_payload()
         return {
-            "printDate": str(payload.get("date") or "--"),
+            "printDate": _display_date_slashes(payload.get("date") or "--"),
             "printTime": str(payload.get("time") or "--"),
         }
     except Exception:
         now = datetime.now()
         return {
-            "printDate": now.strftime("%d-%m-%Y"),
+            "printDate": now.strftime("%d/%m/%Y"),
             "printTime": now.strftime("%H:%M:%S"),
         }
 
@@ -579,6 +579,14 @@ def _parse_display_date(value: Any) -> Optional[datetime]:
     return _parse_report_datetime(value)
 
 
+def _display_date_slashes(value: Any) -> str:
+    """Return DD/MM/YYYY for report-facing date-only fields when possible."""
+    dt = _parse_display_date(value)
+    if dt is not None:
+        return dt.strftime("%d/%m/%Y")
+    return str(value or "").strip() or "N/A"
+
+
 def _add_years(dt: datetime, years: int = 1) -> datetime:
     """Add calendar years; Feb 29 rolls to Feb 28 on non-leap years."""
     try:
@@ -591,8 +599,8 @@ def _validation_dates_from_last(dt: datetime) -> Dict[str, str]:
     """Last validation date and next due exactly one calendar year later."""
     next_dt = _add_years(dt, 1)
     return {
-        "lastValidationDate": dt.strftime("%d-%m-%Y"),
-        "nextValidationDate": next_dt.strftime("%d-%m-%Y"),
+        "lastValidationDate": dt.strftime("%d/%m/%Y"),
+        "nextValidationDate": next_dt.strftime("%d/%m/%Y"),
     }
 
 

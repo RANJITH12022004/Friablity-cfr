@@ -262,6 +262,21 @@ def _format_ts_readable(ts: Any) -> str:
         return str(ts)
 
 
+def _format_display_date(value: Any) -> str:
+    """Normalize date-only values to DD/MM/YYYY for report output."""
+    if value is None:
+        return "N/A"
+    s = str(value).strip()
+    if not s:
+        return "N/A"
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s[:10], fmt).strftime("%d/%m/%Y")
+        except Exception:
+            continue
+    return s
+
+
 def _split_ts_date_and_time(ts: Any) -> tuple:
     """Return (date, time) strings for separate thermal print lines."""
     full = _format_ts_readable(ts)
@@ -1234,6 +1249,8 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
         report_data = dict(report_data)
         report_data["approvalPassFail"] = approval_result
     fs = report_data.get("factorySettings") or {}
+    last_validation_date = _format_display_date(fs.get("lastValidationDate", "N/A"))
+    next_validation_date = _format_display_date(fs.get("nextValidationDate", "N/A"))
     rtype = str(report_data.get("type") or "test").strip().lower()
     title = "FRIABILITY VALIDATION REPORT" if rtype == "validation" else "FRIABILITY TEST REPORT"
     lines: list = []
@@ -1254,8 +1271,8 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                 f"Serial No: {fs.get('serialNo', 'N/A')}",
                 f"Location: {fs.get('companyLocation', fs.get('location', 'N/A'))}",
                 f"Instrument ID: {fs.get('instrumentId', 'N/A')}",
-                f"Last Val: {fs.get('lastValidationDate', 'N/A')}",
-                f"Next Val Due: {fs.get('nextValidationDate', 'N/A')}",
+                f"Last Val: {last_validation_date}",
+                f"Next Val Due: {next_validation_date}",
             ]
         )
     else:
@@ -1267,8 +1284,8 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                 ("Serial No", fs.get("serialNo", "N/A")),
                 ("Location", fs.get("companyLocation", fs.get("location", "N/A"))),
                 ("Instrument ID", fs.get("instrumentId", "N/A")),
-                ("Last Val", fs.get("lastValidationDate", "N/A")),
-                ("Next Val Due", fs.get("nextValidationDate", "N/A")),
+                ("Last Val", last_validation_date),
+                ("Next Val Due", next_validation_date),
             ],
             width,
         )
@@ -1412,7 +1429,7 @@ def _report_timestamp_footer_lines(kind: str = "printed") -> list:
         ptime = payload.get("time") or "--"
     except Exception:
         now = datetime.now()
-        pdate = now.strftime("%d-%m-%Y")
+        pdate = now.strftime("%d/%m/%Y")
         ptime = now.strftime("%H:%M:%S")
     label = "Exported" if str(kind or "").strip().lower() == "exported" else "Printed"
     return ["", f"{label} Date: {pdate}", f"{label} Time: {ptime}"]

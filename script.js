@@ -3042,9 +3042,17 @@ function _cancelBiometricEnrollSession() {
     }).catch(function () {});
 }
 
+function _cancelActiveBiometricCapture() {
+    return apiRequest(API_BASE + '/api/biometric/cancel', {
+        method: 'POST',
+        body: {}
+    }).catch(function () {});
+}
+
 function cancelBiometricProgress() {
     _biometricEnrollCancelled = true;
     if (typeof window._loginBiometricAbort === 'function') {
+        _cancelActiveBiometricCapture();
         window._loginBiometricAbort();
         hideBiometricProgressOverlay();
         window._loginBiometricInFlight = false;
@@ -3052,6 +3060,7 @@ function cancelBiometricProgress() {
         return;
     }
     if (typeof window._biometricVerifyCancelResolve === 'function') {
+        _cancelActiveBiometricCapture();
         var cancelVerify = window._biometricVerifyCancelResolve;
         window._biometricVerifyCancelResolve = null;
         cancelVerify();
@@ -3295,7 +3304,8 @@ function _populateAuditFilterDropdowns(userEl, actionEl, fullList) {
         'Report aborted', 'Report aborted (power loss)', 'Report PDF generated',
         'Recipe created', 'Recipe edited', 'Recipe approved', 'Power interruption',
         'Approval verification', 'Disable Recipe', 'Recipe disabled',
-        'Added new user', 'Password changed', 'User create', 'User update'
+        'Added new user', 'Password changed', 'User create', 'User update',
+        'User disable', 'User enable', 'User unlock'
     ];
     coreActions.forEach(function (a) {
         if (actions.indexOf(a) === -1) actions.push(a);
@@ -9112,18 +9122,16 @@ function disableMember(id) {
     }
     showConfirmModal('Are you sure you want to disable this member?', 'Disable Member').then(function (ok) {
         if (!ok) return;
-        apiRequest(API_BASE + '/api/data/members/' + id, { method: 'GET' })
-            .then(function (data) {
-                var member = (data && data.member) ? data.member : data;
-                if (!member || member.id == null) throw new Error('Member not found');
-                member.status = 'disabled';
-                return apiRequest(API_BASE + '/api/data/members/' + id, {
-                    method: 'PUT',
-                    body: member
-                });
-            })
-            .then(function () {
+        var headers = { 'Content-Type': 'application/json' };
+        if (window.currentUser && window.currentUser.role) headers['X-User-Role'] = window.currentUser.role;
+        if (window.currentUser && window.currentUser.username) headers['X-User-Username'] = window.currentUser.username;
+        if (window.currentUser && window.currentUser.name) headers['X-User-Name'] = window.currentUser.name;
+        fetch((API_BASE || '') + '/api/data/members/' + id + '/disable', { method: 'POST', headers: headers })
+            .then(function (r) { return r.json().catch(function () { return {}; }).then(function (b) { return { ok: r.ok, status: r.status, body: b }; }); })
+            .then(function (res) {
+                if (!res.ok) throw new Error((res.body && res.body.error) ? res.body.error : ('HTTP ' + res.status));
                 loadMembersAndRender();
+                showAppModal('Account disabled.', 'Disable');
             })
             .catch(function (err) {
                 console.error('Failed to disable member', err);

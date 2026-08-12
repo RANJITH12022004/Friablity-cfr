@@ -838,7 +838,62 @@ def _load_audit_export_schedule() -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            latest = None
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                if bool(row.get("purged")):
+                    continue
+                latest = row
+            if not latest:
+                return {}
+            export_id = str(latest.get("id") or latest.get("export_id") or "").strip()
+            entry_ids = []
+            for eid in latest.get("entryIds") or latest.get("entry_ids") or []:
+                s = str(eid).strip()
+                if s:
+                    entry_ids.append(s)
+            staged_at = int(latest.get("stagedAt") or latest.get("exported_at_ms") or 0)
+            confirmed_at = latest.get("confirmedAt")
+            exported_by = {
+                "username": str(latest.get("exporterUsername") or "--").strip() or "--",
+                "employee_id": "--",
+                "role": "--",
+            }
+            approved_by = {
+                "username": str(latest.get("approverUsername") or "--").strip() or "--",
+                "employee_id": "--",
+                "role": "--",
+            }
+            pdf_path = str(latest.get("pdfPath") or latest.get("pdf_path") or "").strip()
+            if confirmed_at:
+                confirmed_ms = int(confirmed_at)
+                return {
+                    "scheduled": {
+                        "export_id": export_id,
+                        "entry_ids": entry_ids,
+                        "exported_by": exported_by,
+                        "approved_by": approved_by,
+                        "exported_at_ms": staged_at or confirmed_ms,
+                        "pdf_path": pdf_path,
+                        "confirmed_at_ms": confirmed_ms,
+                        "purge_at_ms": confirmed_ms + AUDIT_EXPORT_RETENTION_MS,
+                    }
+                }
+            return {
+                "staged": {
+                    "export_id": export_id,
+                    "entry_ids": entry_ids,
+                    "exported_by": exported_by,
+                    "approved_by": approved_by,
+                    "exported_at_ms": staged_at,
+                    "pdf_path": pdf_path,
+                }
+            }
+        return {}
     except Exception:
         return {}
 
@@ -925,12 +980,11 @@ def delete_entries_by_ids(entry_ids: List[Any]) -> int:
         return 0
     ids = []
     for eid in entry_ids:
-        try:
-            n = int(eid)
-            if n > 0:
-                ids.append(n)
-        except (TypeError, ValueError):
+        if eid is None:
             continue
+        s = str(eid).strip()
+        if s:
+            ids.append(s)
     if not ids:
         return 0
     conn = _db_connect()

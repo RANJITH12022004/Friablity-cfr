@@ -249,8 +249,8 @@ def create_blueprint(kiosk):
                     log_audit(
                         attempted_user,
                         "Desktop login",
-                        "Wrong password attempt {}/3 for {}".format(
-                            min(failed_attempt, 3), attempted_user["username"]
+                        "{} entered wrong password (attempt {}/3)".format(
+                            attempted_user["username"], min(failed_attempt, 3)
                         ),
                         outcome="denied",
                         extra={"failedAttempt": failed_attempt, "maximumAttempts": 3},
@@ -265,6 +265,14 @@ def create_blueprint(kiosk):
                         "remainingAttempts": max(0, 3 - failed_attempt),
                     }
                     return jsonify(body), 401
+                attempted = username or "--"
+                log_audit(
+                    {"username": attempted, "name": attempted, "role": "--"},
+                    "Desktop login",
+                    "{} entered wrong password (unknown user)".format(attempted),
+                    outcome="denied",
+                    extra={"unknownUser": True},
+                )
                 body = {"error": "Invalid username or password."}
                 return jsonify(body), 401
             if username.upper() != data_service.FACTORY_USERNAME.upper():

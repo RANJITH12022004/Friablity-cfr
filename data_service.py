@@ -1382,7 +1382,62 @@ def _load_report_export_schedule() -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            latest = None
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                if bool(row.get("purged")):
+                    continue
+                latest = row
+            if not latest:
+                return {}
+            export_id = str(latest.get("id") or latest.get("export_id") or "").strip()
+            report_ids = []
+            for rid in latest.get("reportIds") or latest.get("report_ids") or []:
+                try:
+                    n = int(rid)
+                    if n > 0:
+                        report_ids.append(n)
+                except (TypeError, ValueError):
+                    continue
+            staged_at = int(latest.get("stagedAt") or latest.get("exported_at_ms") or 0)
+            confirmed_at = latest.get("confirmedAt")
+            exported_by = {
+                "username": str(latest.get("exporterUsername") or "--").strip() or "--",
+                "employee_id": "--",
+                "role": "--",
+            }
+            approved_by = {
+                "username": str(latest.get("approverUsername") or "--").strip() or "--",
+                "employee_id": "--",
+                "role": "--",
+            }
+            if confirmed_at:
+                confirmed_ms = int(confirmed_at)
+                return {
+                    "scheduled": {
+                        "export_id": export_id,
+                        "report_ids": report_ids,
+                        "exported_by": exported_by,
+                        "approved_by": approved_by,
+                        "exported_at_ms": staged_at or confirmed_ms,
+                        "confirmed_at_ms": confirmed_ms,
+                        "purge_at_ms": confirmed_ms + REPORT_EXPORT_RETENTION_MS,
+                    }
+                }
+            return {
+                "staged": {
+                    "export_id": export_id,
+                    "report_ids": report_ids,
+                    "exported_by": exported_by,
+                    "approved_by": approved_by,
+                    "exported_at_ms": staged_at,
+                }
+            }
+        return {}
     except Exception:
         return {}
 

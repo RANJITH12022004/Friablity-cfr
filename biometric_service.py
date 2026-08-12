@@ -20,6 +20,7 @@ _config = {}
 _port = None
 _ser = None
 _lock = threading.Lock()
+_cancel_event = threading.Event()
 
 _PACKET_START = b"\xEF\x01"
 _DEFAULT_ADDRESS = 0xFFFFFFFF
@@ -196,6 +197,16 @@ def verify_sensor():
     return _exec(payload, timeout_sec=2.0)
 
 
+def request_cancel():
+    """Ask the active biometric capture loop to stop as soon as possible."""
+    _cancel_event.set()
+
+
+def clear_cancel():
+    """Clear any prior cancel request before starting a new biometric operation."""
+    _cancel_event.clear()
+
+
 def status():
     port = _port or _configured_port()
     if not sensor_available():
@@ -228,6 +239,8 @@ def get_template_count():
 def _wait_for_finger(timeout_sec=10.0):
     end = time.time() + timeout_sec
     while time.time() < end:
+        if _cancel_event.is_set():
+            return {"ok": False, "error": "Biometric capture cancelled", "cancelled": True}
         got = _exec(bytes([_CMD_GEN_IMAGE]), timeout_sec=1.5)
         if got.get("ok"):
             return {"ok": True}
@@ -235,6 +248,8 @@ def _wait_for_finger(timeout_sec=10.0):
             time.sleep(0.2)
             continue
         return got
+    if _cancel_event.is_set():
+        return {"ok": False, "error": "Biometric capture cancelled", "cancelled": True}
     return {"ok": False, "error": "Timed out waiting for finger"}
 
 
@@ -251,6 +266,7 @@ def capture_enroll_finger(buffer_id, timeout_sec=10.0):
     buffer_id = int(buffer_id)
     if buffer_id not in (0x01, 0x02):
         return {"ok": False, "error": "buffer_id must be 1 or 2"}
+    clear_cancel()
     verify = verify_sensor()
     if not verify.get("ok"):
         return verify
@@ -296,6 +312,7 @@ def enroll(template_id, capture_timeout_sec=10.0):
 
 
 def identify(timeout_sec=10.0):
+    clear_cancel()
     verify = verify_sensor()
     if not verify.get("ok"):
         return verify

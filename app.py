@@ -2153,8 +2153,45 @@ def update_member(member_id):
                 target_user=uname,
                 signature=sig,
             )
-        permission_detail = _member_permission_change_detail(before_member, updated, uname)
-        profile_detail = _member_profile_change_detail(before_member, updated, uname)
+        before_status = str((before_member or {}).get("status") or "active").strip().lower()
+        after_status = str((updated or {}).get("status") or "active").strip().lower()
+        actor_name = str(cur.get("username") or cur.get("name") or "--").strip() or "--"
+        # Status flips via PUT must still emit explicit disable/enable audit rows.
+        if before_status != "disabled" and after_status == "disabled":
+            _audit_event(
+                action="User disable",
+                outcome="success",
+                entity_type="member",
+                entity_id=member_id,
+                entity_name=uname,
+                details="{} disabled {}".format(actor_name, uname or "--"),
+                target_user=uname,
+                before=data_service.sanitize_member_for_client(before_member) if before_member else None,
+                after=data_service.sanitize_member_for_client(updated) or updated,
+                signature=sig,
+                extra={"disabledBy": actor_name, "disabledUser": uname or "--", "mode": "profile_update"},
+            )
+            permission_detail = ""
+            profile_detail = ""
+        elif before_status == "disabled" and after_status == "active":
+            _audit_event(
+                action="User enable",
+                outcome="success",
+                entity_type="member",
+                entity_id=member_id,
+                entity_name=uname,
+                details="{} enabled {}".format(actor_name, uname or "--"),
+                target_user=uname,
+                before=data_service.sanitize_member_for_client(before_member) if before_member else None,
+                after=data_service.sanitize_member_for_client(updated) or updated,
+                signature=sig,
+                extra={"enabledBy": actor_name, "enabledUser": uname or "--", "mode": "profile_update"},
+            )
+            permission_detail = ""
+            profile_detail = ""
+        else:
+            permission_detail = _member_permission_change_detail(before_member, updated, uname)
+            profile_detail = _member_profile_change_detail(before_member, updated, uname)
         update_details = permission_detail or profile_detail
         if not update_details and not password_changed:
             update_details = "Profile updated for {}".format(uname or "--")
@@ -2260,9 +2297,13 @@ def unlock_member_route(member_id):
     try:
         before_member = data_service.get_member(member_id)
         cur = data_service.get_current_user() or {}
+        unlocked_by = str(cur.get("username") or cur.get("name") or "--").strip() or "--"
+        unlocked_user = str(
+            (before_member or {}).get("username") or (before_member or {}).get("name") or "--"
+        ).strip() or "--"
         sig = {
             "mode": "session",
-            "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+            "username": unlocked_by,
             "role": (cur.get("role") or "").strip() or "--",
         }
         member = data_service.unlock_member(member_id)
@@ -2272,11 +2313,12 @@ def unlock_member_route(member_id):
             entity_type="member",
             entity_id=member_id,
             entity_name=member.get("username") or member.get("name") or "",
-            details="Member unlocked",
+            details="{} unlocked {}".format(unlocked_by, unlocked_user),
             target_user=member.get("username") or "",
             before=data_service.sanitize_member_for_client(before_member) if before_member else None,
             after=data_service.sanitize_member_for_client(member) or member,
             signature=sig,
+            extra={"unlockedBy": unlocked_by, "unlockedUser": unlocked_user},
         )
         safe = data_service.sanitize_member_for_client(member) or dict(member)
         return jsonify({"success": True, "member": safe}), 200
@@ -2287,6 +2329,72 @@ def unlock_member_route(member_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/data/members/<int:member_id>/disable", methods=["POST"])
+def disable_member_route(member_id):
+    """Disable a member from Manage Profiles (session-signed; no second-person approval)."""
+    if not _session_has_internal("user-delete"):
+        return jsonify({"error": "Forbidden. You do not have permission to disable users."}), 403
+    try:
+        member = data_service.get_member(member_id)
+        if not member:
+            return jsonify({"error": "Member not found"}), 404
+        before_member = dict(member)
+        cur = data_service.get_current_user() or {}
+        disabled_by = str(cur.get("username") or cur.get("name") or "--").strip() or "--"
+        disabled_user = str(member.get("username") or member.get("name") or "--").strip() or "--"
+        sig = {
+            "mode": "session",
+            "username": disabled_by,
+            "role": (cur.get("role") or "").strip() or "--",
+        }
+        template_id = member.get("fingerprintTemplateId")
+        if template_id is not None:
+            deleted = biometric_service.delete_template(template_id)
+            if not deleted.get("ok"):
+                _audit_event(
+                    action="User disable",
+                    outcome="failed",
+                    entity_type="member",
+                    entity_id=member_id,
+                    entity_name=member.get("username") or member.get("name") or "",
+                    details=deleted.get("error") or "Failed to delete fingerprint template from sensor",
+                    target_user=member.get("username") or "",
+                    before=before_member,
+                    signature=sig,
+                    extra={"templateId": template_id},
+                )
+                return jsonify({
+                    "error": deleted.get("error") or "Failed to delete fingerprint template from sensor",
+                    "templateId": int(template_id),
+                }), 400
+            data_service.clear_member_biometric(member_id)
+        member = data_service.disable_member(member_id)
+        _audit_event(
+            action="User disable",
+            outcome="success",
+            entity_type="member",
+            entity_id=member_id,
+            entity_name=member.get("username") or member.get("name") or "",
+            details="{} disabled {}".format(disabled_by, disabled_user),
+            target_user=member.get("username") or "",
+            before=before_member,
+            after=member,
+            signature=sig,
+            extra={
+                "templateIdFreed": template_id,
+                "disabledBy": disabled_by,
+                "disabledUser": disabled_user,
+            },
+        )
+        safe = data_service.sanitize_member_for_client(member) or dict(member)
+        return jsonify({"success": True, "member": safe}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Error disabling member")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/data/members/<int:member_id>/enable", methods=["POST"])
 def enable_member_route(member_id):
     if not _session_has_internal("user-enable"):
@@ -2294,9 +2402,15 @@ def enable_member_route(member_id):
     try:
         before_member = data_service.get_member(member_id)
         cur = data_service.get_current_user() or {}
+        enabled_by = str(cur.get("username") or cur.get("name") or "--").strip() or "--"
+        enabled_user = str(
+            (before_member or {}).get("username")
+            or (before_member or {}).get("name")
+            or "--"
+        ).strip() or "--"
         sig = {
             "mode": "session",
-            "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+            "username": enabled_by,
             "role": (cur.get("role") or "").strip() or "--",
         }
         member = data_service.enable_member(member_id)
@@ -2306,11 +2420,12 @@ def enable_member_route(member_id):
             entity_type="member",
             entity_id=member_id,
             entity_name=member.get("username") or member.get("name") or "",
-            details="Member enabled",
+            details="{} enabled {}".format(enabled_by, enabled_user),
             target_user=member.get("username") or "",
             before=data_service.sanitize_member_for_client(before_member) if before_member else None,
             after=data_service.sanitize_member_for_client(member) or member,
             signature=sig,
+            extra={"enabledBy": enabled_by, "enabledUser": enabled_user},
         )
         safe = data_service.sanitize_member_for_client(member) or dict(member)
         return jsonify({"success": True, "member": safe}), 200
@@ -2471,6 +2586,17 @@ def login():
                     after={"username": user.get("username"), "role": user.get("role")},
                 )
                 return jsonify({"success": True, "user": data_service.sanitize_member_for_client(user) or user}), 200
+            # Do not attribute failed factory attempts to the suppressed Factory actor.
+            _audit_event(
+                action="Login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="password",
+                details="{} entered wrong password".format(username),
+                target_user=username,
+                actor_override={"user": username, "role": "--", "name": username},
+                extra={"failedAttempt": 1, "accountType": "factory"},
+            )
             return jsonify({"error": "Invalid username or password"}), 401
 
         # Normal member: check status first
@@ -2578,7 +2704,9 @@ def login():
                 outcome="denied",
                 entity_type="session",
                 entity_name="password",
-                details="Wrong password attempt {}/3 for {}".format(min(fa, 3), attempted_username),
+                details="{} entered wrong password (attempt {}/3)".format(
+                    attempted_username, min(fa, 3)
+                ),
                 target_user=attempted_username,
                 actor_override={
                     "user": attempted_username,
@@ -2597,6 +2725,17 @@ def login():
                 "error": "Invalid username or password.",
                 "remainingAttempts": remaining
             }), 401
+        attempted = (username or "--").strip() or "--"
+        _audit_event(
+            action="Login",
+            outcome="denied",
+            entity_type="session",
+            entity_name="password",
+            details="{} entered wrong password (unknown user)".format(attempted),
+            target_user=attempted,
+            actor_override={"user": attempted, "role": "--", "name": attempted},
+            extra={"unknownUser": True},
+        )
         return jsonify({"error": "Invalid username or password"}), 401
     except Exception as e:
         app.logger.exception("Error during login")
@@ -2902,14 +3041,23 @@ def approval_verify():
                 return jsonify({"ok": False, "error": "Username and password are required"}), 400
             verifier = data_service.authenticate_user(username, password)
             if not verifier:
+                attempted = username or "--"
+                member = data_service.get_member_by_username(username)
+                attempted_role = str((member or {}).get("role") or "--").strip() or "--"
+                attempted_name = str((member or {}).get("name") or attempted).strip() or attempted
                 _audit_event(
                     action="Approval verification",
                     outcome="failed",
                     entity_type="verification",
                     entity_name=purpose,
-                    details="Invalid credentials",
-                    target_user=username,
-                    extra={"purpose": purpose, "attemptedUser": username, "method": "credentials"},
+                    details="{} entered wrong password".format(attempted),
+                    target_user=attempted,
+                    actor_override={
+                        "user": attempted,
+                        "role": attempted_role,
+                        "name": attempted_name,
+                    },
+                    extra={"purpose": purpose, "attemptedUser": attempted, "method": "credentials"},
                 )
                 return jsonify({"ok": False, "error": "Invalid verifier username or password"}), 401
         elif method == "biometric":
@@ -3251,12 +3399,21 @@ def _stage_report_usb_export(cur, verifier, exported_report_ids):
 def _stage_audit_usb_export(cur, verifier, entry_ids, pdf_path=""):
     ids = []
     for eid in entry_ids or []:
+        if eid is None:
+            continue
+        if isinstance(eid, str):
+            s = eid.strip()
+            if s:
+                ids.append(s)
+            continue
         try:
             n = int(eid)
             if n > 0:
-                ids.append(n)
+                ids.append(str(n))
         except (TypeError, ValueError):
-            continue
+            s = str(eid).strip()
+            if s:
+                ids.append(s)
     if not ids:
         return None, None, None
     export_id = secrets.token_urlsafe(16)
@@ -5047,6 +5204,10 @@ def biometric_enroll():
 def _clear_all_enroll_sessions():
     with _enroll_sessions_lock:
         _enroll_sessions.clear()
+    try:
+        biometric_service.request_cancel()
+    except Exception:
+        pass
 
 
 def _clear_enroll_session(username):
@@ -5186,6 +5347,16 @@ def biometric_enroll_cancel():
         username = str(payload.get("username") or "").strip()
         if username:
             _clear_enroll_session(username)
+        biometric_service.request_cancel()
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/biometric/cancel", methods=["POST"])
+def biometric_cancel():
+    try:
+        biometric_service.request_cancel()
         return jsonify({"ok": True}), 200
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

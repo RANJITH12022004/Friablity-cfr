@@ -1041,7 +1041,7 @@ function guardReportPreviewNavigation(targetPage) {
     if (!isReportPreviewNavigationLocked(window._lastReportPreview)) return false;
     if (targetPage === 'report-preview') return false;
     showAppModal(
-        'This report is awaiting approval. Complete Pass/Fail and sign on this screen, or power off will save a completed test as Aborted (power interruption). Operator aborts stay Aborted.',
+        'This report is awaiting approval. Complete Pass/Fail and sign on this screen, or power off will save the test as Completed (power interruption), approved by System with Fail. Operator aborts stay Aborted.',
         'Report'
     );
     var active = document.querySelector('.page.active');
@@ -1105,28 +1105,33 @@ function unlockReportPreviewAfterServerStatus(preview, reportId, options) {
     if (st === 'approved') {
         if (reportId != null) _saveReportPdfSilent(reportId);
         if (options.showModal !== false) {
-            showAppModal('Report has been approved. You may now print or leave this screen.', 'Report');
+            var approvedMsg = isPowerInterruptionAbortPreview(preview)
+                ? 'This report was completed after a power interruption and approved by System (Fail). You may print or leave this screen.'
+                : 'Report has been approved. You may now print or leave this screen.';
+            showAppModal(approvedMsg, 'Report');
         }
     } else if (options.showModal !== false) {
         var closedMsg = isPowerInterruptionAbortPreview(preview)
-            ? 'This report was closed as Aborted (power interruption) and can no longer be approved. You may leave this screen.'
+            ? 'This report was closed after a power interruption and can no longer be approved. You may leave this screen.'
             : 'This report was closed as Aborted and can no longer be approved. You may leave this screen.';
         showAppModal(closedMsg, 'Report');
     }
     return true;
 }
 
-/** True when an aborted report was closed due to power loss (not operator Abort). */
+/** True when a report was closed due to power loss (not operator Abort). */
 function isPowerInterruptionAbortPreview(preview) {
     preview = preview || {};
     var td = preview.testData || {};
     var cause = String(preview.abortCause || td.abortCause || '').trim().toLowerCase();
+    var approvalSt = String(preview.reportApprovalStatus || '').trim().toLowerCase();
     if (cause === 'operator' || cause === 'user') return false;
     if (cause === 'power_interruption' || cause === 'power_loss' || cause === 'power') return true;
     var remarks = String(preview.approvalRemarks || preview.remarks || td.remarks || '').trim().toLowerCase();
     if (remarks.indexOf('power interruption') >= 0) return true;
     var by = String(preview.approvedBy || '').trim().toLowerCase();
-    return by.indexOf('power interruption') >= 0;
+    if (by.indexOf('power interruption') >= 0) return true;
+    return approvalSt === 'approved' && cause === 'power_interruption';
 }
 
 function refreshReportPreviewApprovalState(reportId) {
@@ -7217,7 +7222,10 @@ function _trSyncTestRunCheckpoint(extra) {
         return apiRequest(API_BASE + '/api/data/test-run/checkpoint', {
             method: 'PUT',
             body: payload
-        }).catch(function () { return null; });
+        }).catch(function (err) {
+            console.warn('Test run checkpoint save failed:', err && err.message ? err.message : err);
+            return null;
+        });
     } catch (e) {
         return Promise.resolve(null);
     }
@@ -8444,7 +8452,10 @@ function _syncValidationRunCheckpoint(extra) {
         return apiRequest(API_BASE + '/api/data/test-run/checkpoint', {
             method: 'PUT',
             body: payload
-        }).catch(function () { return null; });
+        }).catch(function (err) {
+            console.warn('Validation run checkpoint save failed:', err && err.message ? err.message : err);
+            return null;
+        });
     } catch (e) {
         return Promise.resolve(null);
     }

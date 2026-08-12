@@ -348,6 +348,25 @@ def _strip_approver_role_label(name: Any) -> str:
     return s
 
 
+def _is_power_interruption_report(report_data: Dict[str, Any], td: Dict[str, Any]) -> bool:
+    """True when a report was system-closed after power loss during test/validation."""
+    if not isinstance(report_data, dict):
+        report_data = {}
+    if not isinstance(td, dict):
+        td = {}
+    cause = str(report_data.get("abortCause") or td.get("abortCause") or "").strip().lower()
+    if cause in ("power_interruption", "power_loss", "power"):
+        return True
+    for key in ("approvalRemarks", "remarks"):
+        text = str(report_data.get(key) or td.get(key) or "").strip().lower()
+        if "power interruption" in text:
+            return True
+    approved_by = str(report_data.get("approvedBy") or "").strip().lower()
+    return approved_by == "system" and str(report_data.get("reportApprovalStatus") or "").strip().lower() == "approved" and (
+        "power interruption" in str(report_data.get("approvalRemarks") or report_data.get("remarks") or "").lower()
+    )
+
+
 def _wrap_lines(lines: list, width: int) -> list:
     out = []
     for line in lines:
@@ -1081,7 +1100,9 @@ def _append_validation_report_details(
         or report_data.get("createdAt")
         or td.get("createdAt")
     )
-    remarks = report_data.get("remarks")
+    remarks = report_data.get("approvalRemarks")
+    if remarks in (None, ""):
+        remarks = report_data.get("remarks")
     if remarks is None:
         remarks = td.get("remarks")
     dash = "" if thermal else ("-" * width)
@@ -1298,7 +1319,12 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
         if not isinstance(recipe, dict):
             recipe = {}
         status_raw = str(td.get("status", "")).lower() if isinstance(td, dict) else ""
-        status_label = "Aborted" if status_raw == "aborted" else "Completed"
+        if status_raw == "aborted":
+            status_label = "Aborted"
+        elif _is_power_interruption_report(report_data if isinstance(report_data, dict) else {}, td if isinstance(td, dict) else {}):
+            status_label = "Completed"
+        else:
+            status_label = "Completed" if status_raw == "completed" else (status_raw.title() if status_raw else "--")
         derived = report_data.get("reportDerived")
         if not isinstance(derived, dict) or not derived:
             derived = build_test_report_derived(

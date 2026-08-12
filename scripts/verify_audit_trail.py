@@ -292,15 +292,180 @@ def verify_power_interruption(res: RunResult, since_ms: int) -> None:
     _startup_session_power_audit()
 
     entries = audit_service.list_entries({"from": since_ms})
-    pi = [e for e in entries if e.get("action") == "Power interruption"]
-    if pi:
-        res.ok(f"Power interruption logged ({len(pi)} row(s))")
-        if "kiosk-bridge" in (pi[-1].get("details") or "").lower() or "restarted" in (pi[-1].get("details") or "").lower():
-            res.ok("Power interruption details mention restart/shutdown")
+    pi_logout = [e for e in entries if e.get("action") == "Power interruption logout"]
+    if pi_logout:
+        res.ok(f"Power interruption logout logged ({len(pi_logout)} row(s))")
+        details = (pi_logout[-1].get("details") or "").lower()
+        if TEST_USER.lower() in details or "logged in" in details or "shutdown" in details:
+            res.ok("Power interruption logout details mention session/shutdown")
         else:
-            res.note_warn("Power interruption row present but details lack restart wording")
+            res.note_warn("Power interruption logout row present but details lack session wording")
     else:
-        res.fail("Power interruption not logged after simulated unclean startup")
+        res.fail("Power interruption logout not logged after simulated unclean startup")
+
+
+def verify_power_cut_report_recovery(res: RunResult) -> None:
+    import shutil
+    import tempfile
+
+    import audit_service
+    import data_service
+    import print_service
+    import report_service
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="kiosk-power-cut-"))
+    storage = tmp_root / "storage"
+    reports = tmp_root / "reports"
+    audit_db = tmp_root / "db"
+    storage.mkdir(parents=True)
+    reports.mkdir(parents=True)
+    audit_db.mkdir(parents=True)
+    config = {
+        "STORAGE_DIR": storage,
+        "REPORTS_DIR": reports,
+        "AUDIT_DB_DIR": audit_db,
+        "APP_ROOT": APP_ROOT,
+    }
+    data_service.init(config)
+    audit_service.init(config)
+    report_service.init(config)
+    print_service.init(config)
+
+    import app as kiosk_app
+
+    kiosk_app.STORAGE_DIR = storage
+    kiosk_app.REPORTS_DIR = reports
+    kiosk_app.AUDIT_DB_DIR = audit_db
+    data_service.init(config)
+    audit_service.init(config)
+    report_service.init(config)
+    print_service.init(config)
+    startup_power_audit = kiosk_app._startup_session_power_audit
+
+    since_ms = ts_ms() - 1000
+
+    def _assert_recovered_report(report: dict, label: str, expect_type: str) -> bool:
+        td = report.get("testData") or {}
+        ok = True
+        if report.get("type") != expect_type:
+            res.fail(f"{label}: report type {report.get('type')!r} != {expect_type!r}")
+            ok = False
+        if str(report.get("status") or "") != "Completed":
+            res.fail(f"{label}: status {report.get('status')!r} != Completed")
+            ok = False
+        if str(report.get("reportApprovalStatus") or "").lower() != "approved":
+            res.fail(f"{label}: reportApprovalStatus not approved")
+            ok = False
+        if str(report.get("approvalRemarks") or "") != "power interruption":
+            res.fail(f"{label}: approvalRemarks not power interruption")
+            ok = False
+        if str(report.get("approvedBy") or "") != "System":
+            res.fail(f"{label}: approvedBy not System")
+            ok = False
+        if str(report.get("approvalPassFail") or "").upper() != "FAIL":
+            res.fail(f"{label}: approvalPassFail not FAIL")
+            ok = False
+        if expect_type == "test" and str(td.get("status") or "").lower() != "completed":
+            res.fail(f"{label}: testData.status not completed")
+            ok = False
+        if expect_type == "validation" and str(td.get("status") or "").lower() != "fail":
+            res.fail(f"{label}: testData.status not Fail")
+            ok = False
+        entries = audit_service.list_entries({"from": since_ms})
+        pi = [e for e in entries if e.get("action") == "Power interruption"]
+        if not pi:
+            res.fail(f"{label}: missing Power interruption audit row")
+            ok = False
+        elif ok:
+            res.ok(f"{label}: recovered report id {report.get('id')} with Power interruption audit")
+        return ok
+
+    def _run_recovery(checkpoint: dict, label: str, expect_type: str) -> None:
+        for name in ("reports.json", "test_run.json", "session_power_audit_pending.json", "app_clean_stop.flag"):
+            path = storage / name
+            if path.exists():
+                path.unlink()
+        data_service.save_test_run_data(checkpoint)
+        data_service.init(config)
+
+        startup_power_audit()
+        reports_list = data_service.list_reports("all", include_pending=True)
+        if len(reports_list) != 1:
+            res.fail(f"{label}: expected 1 recovered report, got {len(reports_list)}")
+            return
+        _assert_recovered_report(reports_list[0], label, expect_type)
+
+    test_cp = {
+        "type": "test",
+        "_checkpointPhase": "running",
+        "recipe": {
+            "productName": "PowerCut Test",
+            "batchNumber": "PC-1",
+            "stepCount": 1,
+            "steps": [],
+        },
+        "testData": {
+            "status": "running",
+            "productName": "PowerCut Test",
+            "batchNumber": "PC-1",
+            "elapsedSeconds": 30,
+            "testStartTime": "2026-08-12T10:00:00",
+        },
+        "operatorName": TEST_USER,
+        "operatedByUsername": TEST_USER,
+    }
+    _run_recovery(test_cp, "Test checkpoint recovery", "test")
+
+    val_cp = {
+        "type": "validation",
+        "_checkpointPhase": "running",
+        "testData": {
+            "status": "running",
+            "validationRuns": [
+                {
+                    "usp": "USP",
+                    "rpm": 25,
+                    "status": "Running",
+                    "actualRotationCount": 5,
+                    "expectedRotationCount": 100,
+                }
+            ],
+        },
+        "operatorName": TEST_USER,
+    }
+    _run_recovery(val_cp, "Validation checkpoint recovery", "validation")
+
+    for name in ("reports.json", "test_run.json"):
+        path = storage / name
+        if path.exists():
+            path.unlink()
+    op_cp = {
+        "type": "test",
+        "_checkpointPhase": "aborted",
+        "abortCause": "operator",
+        "recipe": {"productName": "Op Abort", "batchNumber": "OA-1", "stepCount": 1, "steps": []},
+        "testData": {"status": "aborted", "remarks": "Aborted", "abortCause": "operator"},
+        "operatorName": TEST_USER,
+    }
+    data_service.save_test_run_data(op_cp)
+    data_service.init(config)
+    startup_power_audit()
+    op_reports = data_service.list_reports("all", include_pending=True)
+    if len(op_reports) != 1:
+        res.fail(f"Operator abort recovery: expected 1 report, got {len(op_reports)}")
+    else:
+        op_report = op_reports[0]
+        if str(op_report.get("status") or "") != "Aborted":
+            res.fail(f"Operator abort recovery: status {op_report.get('status')!r} != Aborted")
+        elif str(op_report.get("reportApprovalStatus") or "").lower() != "aborted":
+            res.fail("Operator abort recovery: reportApprovalStatus not aborted")
+        else:
+            res.ok("Operator abort checkpoint stays Aborted")
+
+    try:
+        shutil.rmtree(tmp_root)
+    except Exception:
+        pass
 
 
 def verify_hardware_routes(c: Client, res: RunResult, since_ms: int) -> None:
@@ -457,6 +622,7 @@ def main() -> int:
 
     power_since = ts_ms() - 1000
     verify_power_interruption(res, power_since)
+    verify_power_cut_report_recovery(res)
 
     verify_pdf_html(res, since_ms - 120000)
 

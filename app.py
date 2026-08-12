@@ -290,6 +290,13 @@ POWER_INTERRUPTION_REMARKS = "power interruption"
 OPERATOR_ABORT_REMARKS = "Aborted"
 ABORT_CAUSE_OPERATOR = "operator"
 ABORT_CAUSE_POWER = "power_interruption"
+_RECOVERABLE_CHECKPOINT_PHASES = frozenset({
+    "running",
+    "awaiting-dispense-or-weights",
+    "awaiting-save",
+    "awaiting-approval",
+    "aborted",
+})
 
 
 def _report_test_status(report: dict) -> str:
@@ -321,6 +328,92 @@ def _report_abort_cause(report: dict) -> str:
     if _report_test_status(report) == "aborted":
         return ABORT_CAUSE_OPERATOR
     return ""
+
+
+def _has_recoverable_test_run_checkpoint() -> bool:
+    """True when test_run.json holds an in-progress test/validation worth recovering after power loss."""
+    cp = data_service.get_test_run_data()
+    if not isinstance(cp, dict) or not cp:
+        return False
+    rtype = (cp.get("type") or "").strip().lower()
+    if rtype not in ("test", "validation"):
+        return False
+    phase = str(cp.get("_checkpointPhase") or "").strip().lower()
+    if phase in _RECOVERABLE_CHECKPOINT_PHASES:
+        return True
+    td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+    st = str(td.get("status") or "").strip().lower()
+    if st in ("running", "completed") and not cp.get("_pendingReportId"):
+        return True
+    return False
+
+
+def _apply_power_interruption_finalize_to_report(report: dict) -> dict:
+    """Finalize a report after power loss: Completed, system-approved, Pass/Fail FAIL."""
+    report = dict(report or {})
+    td = report.get("testData")
+    if not isinstance(td, dict):
+        td = {}
+    else:
+        td = dict(td)
+    td["abortCause"] = ABORT_CAUSE_POWER
+    td["approvalPassFail"] = "FAIL"
+    rtype = str(report.get("type") or "").strip().lower()
+    if rtype == "validation":
+        td["status"] = "Fail"
+    else:
+        td["status"] = "completed"
+    results = td.get("stepResults")
+    if isinstance(results, list):
+        drum_pf = {}
+        for idx, row in enumerate(results):
+            if not isinstance(row, dict):
+                continue
+            row = dict(row)
+            row["approvalPassFail"] = "FAIL"
+            if not row.get("resultText") or str(row.get("resultText")).strip() in ("", "__"):
+                row["resultText"] = "FAIL"
+            if not row.get("drumLabel"):
+                row["drumLabel"] = "Drum {}".format(idx + 1)
+            results[idx] = row
+            drum_pf["drum{}".format(idx + 1)] = "FAIL"
+        td["stepResults"] = results
+        if drum_pf:
+            td["drumPassFail"] = drum_pf
+    val_runs = td.get("validationRuns")
+    if isinstance(val_runs, list):
+        for idx, run in enumerate(val_runs):
+            if not isinstance(run, dict):
+                continue
+            run = dict(run)
+            run["status"] = "Fail"
+            val_runs[idx] = run
+        td["validationRuns"] = val_runs
+    td["remarks"] = POWER_INTERRUPTION_REMARKS
+    report["testData"] = td
+    report["status"] = "Completed"
+    report["remarks"] = POWER_INTERRUPTION_REMARKS
+    report["approvalRemarks"] = POWER_INTERRUPTION_REMARKS
+    report["abortCause"] = ABORT_CAUSE_POWER
+    report["reportApprovalStatus"] = "approved"
+    report["approvedBy"] = "System"
+    report["approvedByUsername"] = "system"
+    report["approvedAt"] = _utc_now_iso()
+    report["approvalPassFail"] = "FAIL"
+    if td.get("drumPassFail"):
+        report["drumPassFail"] = dict(td["drumPassFail"])
+    val_runs_top = report.get("validationRuns")
+    if isinstance(val_runs_top, list):
+        for idx, run in enumerate(val_runs_top):
+            if not isinstance(run, dict):
+                continue
+            run = dict(run)
+            run["status"] = "Fail"
+            val_runs_top[idx] = run
+        report["validationRuns"] = val_runs_top
+    if not report.get("completedAt"):
+        report["completedAt"] = _utc_now_iso()
+    return report
 
 
 def _apply_unclean_shutdown_abort_fields(
@@ -391,17 +484,8 @@ def _apply_unclean_shutdown_abort_fields(
 
 
 def _apply_power_loss_abort_to_report(report: dict) -> dict:
-    """Mark a report aborted after power loss with mandatory power-interruption remarks.
-
-    Used when power cuts mid-test or while a completed report awaits approval.
-    No Pass/Fail is assigned — approval UI is not used for power-loss recovery.
-    """
-    return _apply_unclean_shutdown_abort_fields(
-        report,
-        remarks=POWER_INTERRUPTION_REMARKS,
-        approved_by="System (power interruption)",
-        abort_cause=ABORT_CAUSE_POWER,
-    )
+    """Mark a report completed after power loss with system approval and mandatory FAIL."""
+    return _apply_power_interruption_finalize_to_report(report)
 
 
 def _apply_operator_abort_finalize_to_report(report: dict) -> dict:
@@ -428,13 +512,13 @@ def _apply_operator_abort_finalize_to_report(report: dict) -> dict:
 
 
 def _persist_unclean_shutdown_aborted_report(report: dict, *, force_power_interruption: bool = False) -> dict:
-    """Save unclean-shutdown aborted report and write print artifacts (no Pass/Fail).
+    """Save unclean-shutdown report and write print artifacts.
 
     Operator-aborted pending reports stay labeled Aborted.
-    Power interruption is only for mid-test loss or completed-report-before-approval.
+    Power interruption → Completed, system-approved, Pass/Fail FAIL.
     """
     if force_power_interruption or _report_abort_cause(report) != ABORT_CAUSE_OPERATOR:
-        report = _apply_power_loss_abort_to_report(report)
+        report = _apply_power_interruption_finalize_to_report(report)
     else:
         report = _apply_operator_abort_finalize_to_report(report)
     report_id = report.get("id")
@@ -459,26 +543,47 @@ def _persist_power_loss_aborted_report(report: dict) -> dict:
     return _persist_unclean_shutdown_aborted_report(report)
 
 
+def _audit_power_interruption_report(report: dict) -> None:
+    """Compliance audit row for a test/validation report closed after power loss."""
+    rid = report.get("id")
+    if rid is None:
+        return
+    ctx = _format_report_audit_details(int(rid), report)
+    rtype = str(report.get("type") or "test").strip().lower()
+    td = report.get("testData") if isinstance(report.get("testData"), dict) else {}
+    operator = (
+        report.get("operatorName")
+        or td.get("operatorName")
+        or report.get("operatedByUsername")
+        or td.get("operatedByUsername")
+        or "--"
+    )
+    remarks = str(report.get("approvalRemarks") or report.get("remarks") or POWER_INTERRUPTION_REMARKS).strip()
+    detail = "{} | {} | operator {} | remarks: {} | status: Completed | approved by System".format(
+        ctx,
+        rtype,
+        operator,
+        remarks,
+    )
+    _audit(None, None, "Power interruption", detail)
+
+
 def _audit_unclean_shutdown_aborted_report(report: dict) -> None:
     """Audit row for a report finalized after unclean shutdown."""
     rid = report.get("id")
     if rid is None:
         return
-    ctx = _format_report_audit_details(int(rid), report)
     cause = _report_abort_cause(report) or ABORT_CAUSE_POWER
-    remarks = str(report.get("approvalRemarks") or report.get("remarks") or "").strip()
     if cause == ABORT_CAUSE_OPERATOR:
+        ctx = _format_report_audit_details(int(rid), report)
+        remarks = str(report.get("approvalRemarks") or report.get("remarks") or "").strip()
         detail = "{} | unclean shutdown | status: aborted | remarks: {}".format(
             ctx,
             remarks or OPERATOR_ABORT_REMARKS,
         )
         _audit(None, None, "Report aborted", detail)
         return
-    pl_detail = "{} | unclean shutdown | status: aborted | remarks: {}".format(
-        ctx,
-        remarks or POWER_INTERRUPTION_REMARKS,
-    )
-    _audit(None, None, "Report aborted (power loss)", pl_detail)
+    _audit_power_interruption_report(report)
 
 
 def _audit_power_loss_aborted_report(report: dict) -> None:
@@ -562,16 +667,24 @@ def _startup_session_power_audit():
     try:
         had_clean_shutdown = data_service.consume_app_clean_stop_flag()
         pending = data_service.read_session_power_audit_pending()
-        if pending and not had_clean_shutdown:
-            un = (pending.get("username") or "").strip()
-            # Always recover pending test/validation reports on unclean restart,
-            # even if the power-interruption audit row was already written.
+        checkpoint_recoverable = _has_recoverable_test_run_checkpoint()
+        should_recover_reports = not had_clean_shutdown and (pending or checkpoint_recoverable)
+        if should_recover_reports:
             try:
-                _abort_pending_reports_after_power_loss(None)
-                _create_aborted_report_from_power_loss_checkpoint(None)
+                n_pending = _abort_pending_reports_after_power_loss(None)
+                n_checkpoint = _create_aborted_report_from_power_loss_checkpoint(None)
+                app.logger.info(
+                    "Unclean shutdown report recovery: pending_finalized=%s checkpoint_finalized=%s "
+                    "session_pending=%s checkpoint_recoverable=%s",
+                    n_pending,
+                    n_checkpoint,
+                    bool(pending),
+                    checkpoint_recoverable,
+                )
             except Exception:
                 app.logger.exception("Abort pending reports after power loss failed")
-            if not pending.get("powerAuditLogged"):
+            if pending and not pending.get("powerAuditLogged"):
+                un = (pending.get("username") or "").strip()
                 role = (pending.get("role") or "").strip()
                 audit_time = _audit_time_fields()
                 if audit_service.is_hidden_factory_actor(un, role):
@@ -1680,6 +1793,14 @@ def put_test_run_checkpoint():
         body = request.get_json(force=True, silent=True) or {}
         if not body:
             return jsonify({"ok": False, "error": "Checkpoint body required"}), 400
+        rtype = str(body.get("type") or "").strip().lower()
+        if rtype not in ("test", "validation"):
+            return jsonify({"ok": False, "error": "Checkpoint type must be test or validation"}), 400
+        body["_checkpointSavedAt"] = _utc_now_iso()
+        if not data_service.get_current_user():
+            app.logger.warning(
+                "Checkpoint saved without persisted session file (header session restore may apply)"
+            )
         data_service.save_test_run_data(body)
         return jsonify({"ok": True}), 200
     except Exception as e:

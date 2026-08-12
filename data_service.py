@@ -1091,13 +1091,20 @@ def record_successful_login(username: str) -> Optional[Dict[str, Any]]:
 
 
 def unlock_member(member_id: int) -> Dict[str, Any]:
-    """Set member status to active. Preserves failedAttempts."""
+    """Reactivate a locked account and require a password reset on next login."""
     m = get_member(member_id)
     if not m:
         raise ValueError("Member not found")
     if str(m.get("username", "")).strip().upper() == FACTORY_USERNAME.upper():
         raise ValueError("The factory user cannot be modified.")
     m["status"] = "active"
+    # Clear lockout counter so the next wrong password does not instantly re-lock.
+    m["failedAttempts"] = 0
+    # Force password reset before the user can use the app again.
+    m["mustChangePassword"] = True
+    current_password = str(m.get("password") or "")
+    if current_password:
+        _set_creation_password_commitment(m, current_password)
     _save_member_record(m)
     return m
 

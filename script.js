@@ -2305,7 +2305,7 @@ function login() {
         var msg = data.error || '';
         var remaining = (typeof data.remainingAttempts === 'number') ? data.remainingAttempts : null;
         if (result.status === 403 && data && data.passwordChangeRequired) {
-            showMandatoryPasswordResetScreen(data.username || username);
+            showMandatoryPasswordResetScreen(data.username || username, password);
             return;
         }
         if (result.status === 403 && data && data.passwordExpired) {
@@ -2365,7 +2365,7 @@ function showPasswordExpiredResetScreen(username, oldPassword) {
     }, 60);
 }
 
-function showMandatoryPasswordResetScreen(username) {
+function showMandatoryPasswordResetScreen(username, oldPassword) {
     window._passwordResetScreenMode = 'mandatory';
     window._mandatoryPasswordResetPending = true;
     _setPasswordResetCancelVisible(false);
@@ -2373,7 +2373,7 @@ function showMandatoryPasswordResetScreen(username) {
     var subEl = document.getElementById('password-reset-page-subtitle');
     if (titleEl) titleEl.textContent = 'Reset your password';
     if (subEl) {
-        subEl.textContent = 'Your account was created with a temporary password. Choose a new password that only you know before you can use the app.';
+        subEl.textContent = 'Your password must be reset before you can continue. Choose a new password to finish signing in.';
     }
     var login = document.getElementById('page-login');
     var app = document.querySelector('.app-container');
@@ -2396,10 +2396,11 @@ function showMandatoryPasswordResetScreen(username) {
         var newEl = document.getElementById('expired-reset-new-password');
         var confEl = document.getElementById('expired-reset-confirm-password');
         if (userEl) userEl.value = username || '';
-        if (oldEl) oldEl.value = '';
+        if (oldEl) oldEl.value = oldPassword || '';
         if (newEl) { newEl.value = ''; }
         if (confEl) { confEl.value = ''; }
-        if (oldEl && typeof oldEl.focus === 'function') oldEl.focus();
+        if (newEl && typeof newEl.focus === 'function') newEl.focus();
+        else if (oldEl && typeof oldEl.focus === 'function') oldEl.focus();
     }, 60);
 }
 
@@ -5116,7 +5117,7 @@ function unlockMember(id) {
             .then(function (res) {
                 if (!res.ok) throw new Error((res.body && res.body.error) ? res.body.error : ('HTTP ' + res.status));
                 loadMembersAndRender();
-                showAppModal('Account unlocked.', 'Unlock');
+                showAppModal('Account unlocked. The user must reset their password on next login.', 'Unlock');
             })
             .catch(function (err) {
                 showAppModal('Failed to unlock: ' + (err && err.message ? err.message : 'Unknown error'), 'Unlock');

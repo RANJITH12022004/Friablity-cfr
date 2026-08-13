@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
 
@@ -376,11 +376,16 @@ def _read_duration_seconds_candidate(td: dict, report: dict) -> Optional[int]:
     return None
 
 
+def _format_report_wall_iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+
 def _stamp_power_cut_run_duration(report: dict) -> dict:
     """Set duration to actual run time captured before power loss (not 00:00:00).
 
     Uses checkpoint elapsed/duration and start→checkpoint timestamps.
     Does not use recovery-time "now", which would include reboot delay.
+    Reconstructs start/end when checkpoint incorrectly stored them as equal.
     """
     report = dict(report or {})
     td = report.get("testData")
@@ -421,16 +426,43 @@ def _stamp_power_cut_run_duration(report: dict) -> dict:
     if wall_secs is not None:
         duration = max(duration, wall_secs)
 
-    end_iso = end_raw if end_raw else _utc_now_iso()
+    # Prefer last durable checkpoint instant as end; never inflate with reboot "now".
+    # When start≈end (common checkpoint bug: both written as sync "now"), keep end at the
+    # checkpoint and rewind start by elapsed duration so reports show the real run window.
+    if duration > 0 and end_dt is not None and (
+        start_dt is None or wall_secs == 0 or (start_dt is not None and end_dt <= start_dt)
+    ):
+        start_dt = end_dt - timedelta(seconds=duration)
+    elif duration > 0 and start_dt is not None and end_dt is None:
+        end_dt = start_dt + timedelta(seconds=duration)
+
+    if start_dt is not None:
+        start_iso = _format_report_wall_iso(start_dt)
+        td["testStartTime"] = start_iso
+        if td.get("validationStartTime") or report.get("validationStartTime") or str(report.get("type") or "").strip().lower() == "validation":
+            td["validationStartTime"] = td.get("validationStartTime") or start_iso
+            report["validationStartTime"] = report.get("validationStartTime") or start_iso
+        report["testStartTime"] = start_iso
+    else:
+        start_iso = start_raw
+
+    if end_dt is not None:
+        end_iso = _format_report_wall_iso(end_dt)
+    else:
+        end_iso = end_raw if end_raw else (start_iso if start_iso else _utc_now_iso())
+
     td["durationSeconds"] = duration
     td["elapsedSeconds"] = duration
     td["durationSec"] = duration
     td["validationDurationSec"] = duration
     td["testEndTime"] = end_iso
-    if td.get("validationStartTime") or report.get("validationStartTime"):
+    if td.get("validationStartTime") or report.get("validationStartTime") or str(report.get("type") or "").strip().lower() == "validation":
         td["validationEndTime"] = end_iso
+        report["validationEndTime"] = end_iso
     report["testData"] = td
-    report["completedAt"] = report.get("completedAt") or end_iso
+    report["testEndTime"] = end_iso
+    # completedAt must be power-cut instant, not reboot time
+    report["completedAt"] = end_iso
     report["durationSeconds"] = duration
     report["durationSec"] = duration
 
@@ -450,7 +482,12 @@ def _stamp_power_cut_run_duration(report: dict) -> dict:
             run["durationSec"] = run_duration
             run["durationSeconds"] = run_duration
             run["validationDurationSec"] = run_duration
-            run["completedAt"] = run.get("completedAt") or end_iso
+            if start_iso:
+                run["validationStartTime"] = run.get("validationStartTime") or start_iso
+                run["testStartTime"] = run.get("testStartTime") or start_iso
+            run["validationEndTime"] = end_iso
+            run["testEndTime"] = end_iso
+            run["completedAt"] = end_iso
             val_runs[idx] = run
         td["validationRuns"] = val_runs
         report["testData"] = td
@@ -532,8 +569,10 @@ def _apply_power_interruption_finalize_to_report(report: dict) -> dict:
             run["status"] = "Fail"
             val_runs_top[idx] = run
         report["validationRuns"] = val_runs_top
+    # Keep completedAt from duration stamp (last checkpoint), never reboot wall clock.
     if not report.get("completedAt"):
-        report["completedAt"] = _utc_now_iso()
+        td_end = (report.get("testData") or {}).get("testEndTime") if isinstance(report.get("testData"), dict) else None
+        report["completedAt"] = td_end or _utc_now_iso()
     report.pop("_checkpointAt", None)
     report.pop("_checkpointSavedAt", None)
     report.pop("_checkpointPhase", None)
@@ -808,22 +847,36 @@ def _startup_session_power_audit():
         had_clean_shutdown = data_service.consume_app_clean_stop_flag()
         pending = data_service.read_session_power_audit_pending()
         checkpoint_recoverable = _has_recoverable_test_run_checkpoint()
-        should_recover_reports = not had_clean_shutdown and (pending or checkpoint_recoverable)
-        if should_recover_reports:
+        # In-progress checkpoints always finalize — a leftover clean-stop flag (or SIGTERM
+        # that precedes hard power loss) must not drop a live test/validation report.
+        should_finalize_checkpoint = checkpoint_recoverable
+        # Pending-approval reports stay pending across intentional clean restarts.
+        should_finalize_pending = not had_clean_shutdown
+        should_log_power_logout = (
+            bool(pending)
+            and not pending.get("powerAuditLogged")
+            and (should_finalize_checkpoint or should_finalize_pending)
+        )
+        if should_finalize_checkpoint or should_finalize_pending:
             try:
-                n_pending = _abort_pending_reports_after_power_loss(None)
-                n_checkpoint = _create_aborted_report_from_power_loss_checkpoint(None)
+                n_pending = 0
+                n_checkpoint = 0
+                if should_finalize_pending:
+                    n_pending = _abort_pending_reports_after_power_loss(None)
+                if should_finalize_checkpoint:
+                    n_checkpoint = _create_aborted_report_from_power_loss_checkpoint(None)
                 app.logger.info(
                     "Unclean shutdown report recovery: pending_finalized=%s checkpoint_finalized=%s "
-                    "session_pending=%s checkpoint_recoverable=%s",
+                    "session_pending=%s checkpoint_recoverable=%s had_clean_shutdown=%s",
                     n_pending,
                     n_checkpoint,
                     bool(pending),
                     checkpoint_recoverable,
+                    had_clean_shutdown,
                 )
             except Exception:
                 app.logger.exception("Abort pending reports after power loss failed")
-            if pending and not pending.get("powerAuditLogged"):
+            if should_log_power_logout:
                 un = (pending.get("username") or "").strip()
                 role = (pending.get("role") or "").strip()
                 audit_time = _audit_time_fields()
@@ -858,6 +911,7 @@ def _startup_session_power_audit():
         # Clean stop (service restart / orderly shutdown): leave pending reports alone.
         # They stay awaiting approval so a verifier can still sign after reboot.
         # Only unclean power loss (branch above) converts pending -> aborted.
+        # Exception: in-progress checkpoints always finalize (above).
         cur = data_service.get_current_user()
         if cur:
             if not pending:
@@ -871,13 +925,21 @@ def _startup_session_power_audit():
         app.logger.exception("Startup session power audit failed")
 
 
+def _should_mark_clean_shutdown() -> bool:
+    """False while a test/validation checkpoint is active — power loss often gets SIGTERM first."""
+    try:
+        return not _has_recoverable_test_run_checkpoint()
+    except Exception:
+        return True
+
 
 def _register_clean_shutdown_atexit():
     """Mark clean shutdown on normal process exit (pending reports recovered on next start)."""
 
     def _on_exit():
         try:
-            data_service.touch_app_clean_stop_flag()
+            if _should_mark_clean_shutdown():
+                data_service.touch_app_clean_stop_flag()
         except Exception:
             pass
 
@@ -891,7 +953,8 @@ def _register_clean_shutdown_signals():
 
     def _handler(signum, frame):
         try:
-            data_service.touch_app_clean_stop_flag()
+            if _should_mark_clean_shutdown():
+                data_service.touch_app_clean_stop_flag()
         except Exception:
             pass
 

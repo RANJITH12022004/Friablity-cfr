@@ -344,7 +344,7 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
 
     since_ms = ts_ms() - 1000
 
-    def _assert_recovered_report(report: dict, label: str, expect_type: str) -> bool:
+    def _assert_recovered_report(report: dict, label: str, expect_type: str, expect_duration: int) -> bool:
         td = report.get("testData") or {}
         ok = True
         if report.get("type") != expect_type:
@@ -378,16 +378,33 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
             dur_n = int(dur) if dur is not None else -1
         except (TypeError, ValueError):
             dur_n = -1
-        if expect_type == "test" and dur_n < 30:
-            res.fail(f"{label}: durationSeconds {dur!r} expected >= 30")
+        if dur_n < expect_duration:
+            res.fail(f"{label}: durationSeconds {dur!r} expected >= {expect_duration}")
             ok = False
-        if expect_type == "validation" and dur_n < 12:
-            res.fail(f"{label}: durationSec {dur!r} expected >= 12")
+        start = td.get("testStartTime") or td.get("validationStartTime")
+        end = td.get("testEndTime") or td.get("validationEndTime") or report.get("completedAt")
+        if not start or not end:
+            res.fail(f"{label}: missing start/end times start={start!r} end={end!r}")
             ok = False
+        elif expect_duration > 0 and str(start) == str(end):
+            res.fail(f"{label}: start==end ({start!r}) despite duration {dur_n}")
+            ok = False
+        elif start and end and expect_duration > 0:
+            try:
+                from datetime import datetime as _dt
+                sdt = _dt.fromisoformat(str(start).replace("Z", "+00:00")).replace(tzinfo=None)
+                edt = _dt.fromisoformat(str(end).replace("Z", "+00:00")).replace(tzinfo=None)
+                gap = int((edt - sdt).total_seconds())
+                if gap < expect_duration:
+                    res.fail(f"{label}: end-start={gap}s < expected duration {expect_duration}")
+                    ok = False
+            except Exception as exc:
+                res.fail(f"{label}: could not parse start/end: {exc}")
+                ok = False
         derived = report.get("reportDerived") or {}
         if expect_type == "test" and derived:
             try:
-                if int(derived.get("durationSeconds") or -1) < 30:
+                if int(derived.get("durationSeconds") or -1) < expect_duration:
                     res.fail(f"{label}: reportDerived.durationSeconds not preserved")
                     ok = False
             except (TypeError, ValueError):
@@ -402,12 +419,15 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
             res.ok(f"{label}: recovered report id {report.get('id')} with Power interruption audit")
         return ok
 
-    def _run_recovery(checkpoint: dict, label: str, expect_type: str) -> None:
+    def _run_recovery(checkpoint: dict, label: str, expect_type: str, expect_duration: int, *, leave_clean_flag: bool = False) -> None:
         for name in ("reports.json", "test_run.json", "session_power_audit_pending.json", "app_clean_stop.flag"):
             path = storage / name
             if path.exists():
                 path.unlink()
         data_service.save_test_run_data(checkpoint)
+        data_service.write_session_power_audit_pending({"username": TEST_USER, "role": "User"})
+        if leave_clean_flag:
+            data_service.touch_app_clean_stop_flag()
         data_service.init(config)
 
         startup_power_audit()
@@ -415,7 +435,7 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
         if len(reports_list) != 1:
             res.fail(f"{label}: expected 1 recovered report, got {len(reports_list)}")
             return
-        _assert_recovered_report(reports_list[0], label, expect_type)
+        _assert_recovered_report(reports_list[0], label, expect_type, expect_duration)
 
     test_cp = {
         "type": "test",
@@ -440,7 +460,42 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
         "operatorName": TEST_USER,
         "operatedByUsername": TEST_USER,
     }
-    _run_recovery(test_cp, "Test checkpoint recovery", "test")
+    _run_recovery(test_cp, "Test checkpoint recovery", "test", 30)
+
+    # Collapsed start==end in checkpoint (field bug) must still reconstruct times from elapsed.
+    collapsed_cp = {
+        "type": "test",
+        "_checkpointPhase": "running",
+        "_checkpointAt": "2026-08-12T11:05:00",
+        "_checkpointSavedAt": "2026-08-12T11:05:00",
+        "recipe": {"productName": "Collapsed Times", "batchNumber": "CT-1", "stepCount": 1, "steps": []},
+        "testData": {
+            "status": "running",
+            "productName": "Collapsed Times",
+            "batchNumber": "CT-1",
+            "elapsedSeconds": 90,
+            "durationSeconds": 90,
+            "testStartTime": "2026-08-12T11:05:00",
+            "testEndTime": "2026-08-12T11:05:00",
+        },
+        "operatorName": TEST_USER,
+        "operatedByUsername": TEST_USER,
+    }
+    _run_recovery(collapsed_cp, "Collapsed start==end reconstruction", "test", 90)
+
+    # Leftover clean-stop flag must not drop an in-progress checkpoint.
+    clean_flag_cp = dict(test_cp)
+    clean_flag_cp["testData"] = dict(test_cp["testData"])
+    clean_flag_cp["testData"]["productName"] = "CleanFlag Bypass"
+    clean_flag_cp["recipe"] = dict(test_cp["recipe"])
+    clean_flag_cp["recipe"]["productName"] = "CleanFlag Bypass"
+    _run_recovery(
+        clean_flag_cp,
+        "Checkpoint recovery despite clean-stop flag",
+        "test",
+        30,
+        leave_clean_flag=True,
+    )
 
     val_cp = {
         "type": "validation",
@@ -467,7 +522,7 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
         },
         "operatorName": TEST_USER,
     }
-    _run_recovery(val_cp, "Validation checkpoint recovery", "validation")
+    _run_recovery(val_cp, "Validation checkpoint recovery", "validation", 12)
 
     for name in ("reports.json", "test_run.json"):
         path = storage / name

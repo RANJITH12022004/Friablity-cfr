@@ -243,6 +243,28 @@ def _save_json_file(filepath: pathlib.Path, data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def _save_json_file_durable(filepath: pathlib.Path, data):
+    """Atomic replace + fsync so sudden power loss keeps the last complete checkpoint."""
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = filepath.with_suffix(filepath.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    os.replace(tmp_path, filepath)
+    try:
+        dir_fd = os.open(str(filepath.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+
+
 # =================== RECIPE OPERATIONS ==========================
 
 
@@ -1350,9 +1372,9 @@ def touch_app_clean_stop_flag():
 
 
 def save_test_run_data(test_data: Dict[str, Any]):
-    """Save quick test run data."""
+    """Save in-progress test/validation checkpoint (durable for power-cut recovery)."""
     test_path = _get_storage_path("test_run.json")
-    _save_json_file(test_path, test_data)
+    _save_json_file_durable(test_path, test_data)
 
 
 def get_test_run_data() -> Dict[str, Any]:

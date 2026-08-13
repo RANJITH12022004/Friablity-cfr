@@ -33,6 +33,8 @@ var VALIDATION_RUN_DURATION_SEC = 240;
 var validationRunSecondsRemaining = 240;
 /** Wall-clock start of the active validation run (Date.now()); null when idle. */
 var validationRunStartMs = null;
+/** Stable local ISO for validation start; preserved across checkpoint syncs. */
+var validationRunStartIso = null;
 var validationRunLastCheckpointElapsed = -1;
 var VALIDATION_TARGET_RPM = 25;
 var VALIDATION_RPM_WARMUP_ROTATIONS = 6;
@@ -4983,6 +4985,7 @@ function initValidationRunPage() {
     validationRunState = 'idle';
     validationRunSecondsRemaining = VALIDATION_RUN_DURATION_SEC;
     validationRunStartMs = null;
+    validationRunStartIso = null;
     validationRunLastCheckpointElapsed = -1;
     updateValidationRunTimerUi(validationRunSecondsRemaining);
     if (typeof _clearValidationRunTimer === 'function') _clearValidationRunTimer();
@@ -6397,6 +6400,7 @@ var _tr = {
     livePollInterval: null,
     livePollInFlight: false,
     runStartMs: null,
+    testStartIso: null,
     _lastCheckpointElapsed: -1,
     _lastTimerPaintSec: -1
 };
@@ -6459,6 +6463,8 @@ function initTestRunPage(recipe) {
     _tr.startPending = false;
     _tr.rotationCount = 0;
     _tr.elapsedSeconds = 0;
+    _tr.runStartMs = null;
+    _tr.testStartIso = null;
     _tr.batchNumber1 = _tr.recipe.batchNumber1 || _tr.recipe.batchNumber || '--';
     _tr.batchNumber2 = _tr.recipe.batchNumber2 || '--';
     _tr.initialWeight1 = _tr.recipe.initialWeight1 != null ? Number(_tr.recipe.initialWeight1) : null;
@@ -6652,6 +6658,20 @@ function _trStopSpin() {
 
 function _trFormatTime(secs) { return formatSecondsToMmSs(secs); }
 
+function _trEnsureTestStartIso() {
+    if (_tr.testStartIso) return _tr.testStartIso;
+    if (_tr.runStartMs) {
+        _tr.testStartIso = (typeof formatLocalWallClockIso === 'function')
+            ? formatLocalWallClockIso(new Date(_tr.runStartMs))
+            : new Date(_tr.runStartMs).toISOString();
+    } else {
+        _tr.testStartIso = (typeof formatLocalWallClockIso === 'function')
+            ? formatLocalWallClockIso()
+            : new Date().toISOString();
+    }
+    return _tr.testStartIso;
+}
+
 function _trClearRunIntervals() {
     if (_tr.timerInterval) { clearInterval(_tr.timerInterval); _tr.timerInterval = null; }
     if (_tr.timerRafId != null) {
@@ -6701,7 +6721,9 @@ function _trStartRunLoop() {
     _tr.running = true;
     _tr.startPending = false;
     _tr.paused = false;
-    _tr.runStartMs = Date.now();
+    // Keep start time from when Start was sent to ESP (do not reset to ack time).
+    if (!_tr.runStartMs) _tr.runStartMs = Date.now();
+    _trEnsureTestStartIso();
     _tr._lastCheckpointElapsed = -1;
     _tr._lastTimerPaintSec = -1;
     _tr.livePollInFlight = false;
@@ -6827,8 +6849,11 @@ function trStartTest() {
     var startGen = _trBumpRunGeneration();
     _tr.startPending = true;
     if (typeof _trSyncNavigationLock === 'function') _trSyncNavigationLock();
-    // Durable checkpoint as soon as Start is pressed (before hardware ack) so
-    // power cut during start still recovers a report.
+    // Capture stable start when hardware start is sent; never rewrite on later syncs.
+    _tr.runStartMs = Date.now();
+    _tr.testStartIso = null;
+    _trEnsureTestStartIso();
+    // Durable checkpoint as soon as Start is sent to ESP so power cut during start recovers.
     if (typeof _trSyncTestRunCheckpoint === 'function') _trSyncTestRunCheckpoint();
     apiRequest(API_BASE + '/api/hardware/friability/start', { method: 'POST', body: { rpm: _tr.rpm } })
         .then(function (res) {
@@ -6842,6 +6867,8 @@ function trStartTest() {
         .catch(function (err) {
             if (startGen !== _trRunGeneration) return;
             _tr.startPending = false;
+            _tr.testStartIso = null;
+            _tr.runStartMs = null;
             if (typeof _trClearTestRunCheckpoint === 'function') _trClearTestRunCheckpoint();
             if (typeof _trSyncNavigationLock === 'function') _trSyncNavigationLock();
             if (startBtn) startBtn.disabled = false;
@@ -7011,6 +7038,7 @@ function _trDoStop() {
     _tr.rotationCount = 0;
     _tr.elapsedSeconds = 0;
     _tr.runStartMs = null;
+    _tr.testStartIso = null;
     if (!createAbortReport) {
         _tr.initialWeight1 = null;
         _tr.initialWeight2 = null;
@@ -7221,6 +7249,11 @@ function _trClearTestRunCheckpoint() {
 
 function _trSyncTestRunCheckpoint(extra) {
     try {
+        if ((_tr.running || _tr.startPending) && _tr.runStartMs) {
+            var liveElapsed = Math.floor((Date.now() - _tr.runStartMs) / 1000);
+            if (liveElapsed < 0) liveElapsed = 0;
+            _tr.elapsedSeconds = liveElapsed;
+        }
         var payload = stampOperatorOnTestReportPayload(_trBuildCompletionReportPayload(extra || {}));
         payload._checkpointAt = (typeof formatLocalWallClockIso === 'function') ? formatLocalWallClockIso() : new Date().toISOString();
         var phase = 'idle';
@@ -7230,10 +7263,14 @@ function _trSyncTestRunCheckpoint(extra) {
         if (payload.testData && typeof payload.testData === 'object') {
             payload.testData.elapsedSeconds = _tr.elapsedSeconds;
             payload.testData.durationSeconds = _tr.elapsedSeconds;
+            payload.testData.testStartTime = _trEnsureTestStartIso();
+            payload.testData.testEndTime = payload._checkpointAt;
             if (_tr.running || _tr.startPending) {
                 payload.testData.status = 'running';
             }
         }
+        payload.createdAt = _trEnsureTestStartIso();
+        payload.completedAt = payload._checkpointAt;
         return apiRequest(API_BASE + '/api/data/test-run/checkpoint', {
             method: 'PUT',
             body: payload
@@ -7381,14 +7418,13 @@ function _trBuildCompletionReportPayload(opts) {
             resultText: '__'
         });
     }
-    var startIso = (typeof formatLocalWallClockIso === 'function')
-        ? formatLocalWallClockIso(new Date(Date.now() - (_tr.elapsedSeconds * 1000)))
-        : new Date(Date.now() - (_tr.elapsedSeconds * 1000)).toISOString();
+    // Stable start from first Start send; end is last checkpoint/"now" only.
+    var startIso = _trEnsureTestStartIso();
     return {
         name: 'Friability Test - ' + (recipe.productName || recipe.name || 'Recipe') + (isAborted ? ' (Aborted)' : ''),
         type: 'test',
         status: isAborted ? 'Aborted' : 'Completed',
-        createdAt: nowIso,
+        createdAt: startIso,
         completedAt: nowIso,
         recipe: recipe,
         remarks: '',
@@ -8252,6 +8288,7 @@ function _parseValidationStreamPayload(data) {
 function _validationAbortFromHardwareError(kind, lineStr, norm) {
     if (typeof _clearValidationRunTimer === 'function') _clearValidationRunTimer();
     validationRunStartMs = null;
+    validationRunStartIso = null;
     validationRunLastCheckpointElapsed = -1;
     validationRunState = 'idle';
     if (typeof setValidationRunNavigationLock === 'function') setValidationRunNavigationLock(false);
@@ -8378,6 +8415,20 @@ function validationRunHardwareMessage(ev) {
     }
 }
 
+function _ensureValidationStartIso() {
+    if (validationRunStartIso) return validationRunStartIso;
+    if (validationRunStartMs) {
+        validationRunStartIso = (typeof formatLocalWallClockIso === 'function')
+            ? formatLocalWallClockIso(new Date(validationRunStartMs))
+            : new Date(validationRunStartMs).toISOString();
+    } else {
+        validationRunStartIso = (typeof formatLocalWallClockIso === 'function')
+            ? formatLocalWallClockIso()
+            : new Date().toISOString();
+    }
+    return validationRunStartIso;
+}
+
 function _buildValidationInProgressCheckpointPayload() {
     var elapsed = 0;
     if (validationRunStartMs) {
@@ -8388,11 +8439,7 @@ function _buildValidationInProgressCheckpointPayload() {
     if (elapsed < 0) elapsed = 0;
     if (elapsed > VALIDATION_RUN_DURATION_SEC) elapsed = VALIDATION_RUN_DURATION_SEC;
     var now = (typeof formatLocalWallClockIso === 'function') ? formatLocalWallClockIso() : new Date().toISOString();
-    var startIso = validationRunStartMs
-        ? ((typeof formatLocalWallClockIso === 'function')
-            ? formatLocalWallClockIso(new Date(validationRunStartMs))
-            : new Date(validationRunStartMs).toISOString())
-        : now;
+    var startIso = _ensureValidationStartIso();
     var run = _enrichValidationRunFields({
         validationSubtype: 'usp',
         usp: 'USP',
@@ -8406,6 +8453,8 @@ function _buildValidationInProgressCheckpointPayload() {
         status: 'Running',
         validationStartTime: startIso,
         testStartTime: startIso,
+        validationEndTime: now,
+        testEndTime: now,
         completedAt: now
     });
     var user = window.currentUser || {};
@@ -8428,7 +8477,9 @@ function _buildValidationInProgressCheckpointPayload() {
         actualTapCount: run.actualTapCount,
         validationStartTime: run.validationStartTime,
         testStartTime: run.testStartTime,
-        createdAt: now,
+        validationEndTime: now,
+        testEndTime: now,
+        createdAt: startIso,
         completedAt: now,
         operatedByUsername: normalizeReportUsername(user.username || user.name || ''),
         operatorName: user.name || user.username || '--',
@@ -8444,6 +8495,8 @@ function _buildValidationInProgressCheckpointPayload() {
             expectedTapCount: run.expectedTapCount,
             validationStartTime: run.validationStartTime,
             testStartTime: run.testStartTime,
+            validationEndTime: now,
+            testEndTime: now,
             durationSec: run.durationSec,
             durationSeconds: elapsed,
             elapsedSeconds: elapsed,
@@ -8677,6 +8730,7 @@ function abortValidationRun(opts) {
     if (btn) btn.disabled = true;
     if (typeof _clearValidationRunTimer === 'function') _clearValidationRunTimer();
     validationRunStartMs = null;
+    validationRunStartIso = null;
     validationRunLastCheckpointElapsed = -1;
     _stopValidationLivePoll();
     if (typeof _syncValidationRunCheckpoint === 'function') {
@@ -8933,7 +8987,9 @@ function toggleValidationRunState() {
                 });
                 validationRunCurrentCount = 0;
                 setValRunEl('val-run-rotation-count', '0');
-                validationRunStartMs = Date.now();
+                // Keep start time from when Start was sent (do not reset on hardware ack).
+                if (!validationRunStartMs) validationRunStartMs = Date.now();
+                _ensureValidationStartIso();
                 validationRunLastCheckpointElapsed = -1;
                 validationRunSecondsRemaining = VALIDATION_RUN_DURATION_SEC;
                 updateValidationRunTimerUi(validationRunSecondsRemaining);
@@ -8957,9 +9013,11 @@ function toggleValidationRunState() {
             });
         }
 
-        // Durable checkpoint as soon as Start is pressed (before hardware ack).
+        // Durable checkpoint as soon as Start is sent to ESP (before hardware ack).
         validationRunState = 'starting';
         validationRunStartMs = Date.now();
+        validationRunStartIso = null;
+        _ensureValidationStartIso();
         validationRunSecondsRemaining = VALIDATION_RUN_DURATION_SEC;
         validationRunCurrentCount = 0;
         if (typeof _syncValidationRunCheckpoint === 'function') {

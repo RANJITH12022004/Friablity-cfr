@@ -348,8 +348,129 @@ def _has_recoverable_test_run_checkpoint() -> bool:
     return False
 
 
+def _parse_report_wall_datetime(value) -> Optional[datetime]:
+    s = str(value or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
+        return dt
+    except Exception:
+        return None
+
+
+def _read_duration_seconds_candidate(td: dict, report: dict) -> Optional[int]:
+    for src in (td, report):
+        if not isinstance(src, dict):
+            continue
+        for key in ("durationSeconds", "elapsedSeconds", "durationSec", "validationDurationSec"):
+            val = src.get(key)
+            if val is None or val == "":
+                continue
+            try:
+                return max(0, int(val))
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _stamp_power_cut_run_duration(report: dict) -> dict:
+    """Set duration to actual run time captured before power loss (not 00:00:00).
+
+    Uses checkpoint elapsed/duration and start→checkpoint timestamps.
+    Does not use recovery-time "now", which would include reboot delay.
+    """
+    report = dict(report or {})
+    td = report.get("testData")
+    if not isinstance(td, dict):
+        td = {}
+    else:
+        td = dict(td)
+    existing = _read_duration_seconds_candidate(td, report)
+    approval_st = str(report.get("reportApprovalStatus") or "").strip().lower()
+    # Pending-approval reports already finished — keep their stored duration.
+    if approval_st == "pending" and existing is not None and existing > 0:
+        report["testData"] = td
+        return report
+
+    start_raw = (
+        td.get("testStartTime")
+        or report.get("testStartTime")
+        or td.get("validationStartTime")
+        or report.get("validationStartTime")
+    )
+    end_raw = (
+        report.get("_checkpointAt")
+        or report.get("_checkpointSavedAt")
+        or td.get("testEndTime")
+        or report.get("testEndTime")
+        or td.get("validationEndTime")
+        or report.get("validationEndTime")
+        or report.get("completedAt")
+        or td.get("completedAt")
+    )
+    start_dt = _parse_report_wall_datetime(start_raw)
+    end_dt = _parse_report_wall_datetime(end_raw)
+    wall_secs = None
+    if start_dt is not None and end_dt is not None and end_dt >= start_dt:
+        wall_secs = max(0, int((end_dt - start_dt).total_seconds()))
+
+    duration = existing if existing is not None else 0
+    if wall_secs is not None:
+        duration = max(duration, wall_secs)
+
+    end_iso = end_raw if end_raw else _utc_now_iso()
+    td["durationSeconds"] = duration
+    td["elapsedSeconds"] = duration
+    td["durationSec"] = duration
+    td["validationDurationSec"] = duration
+    td["testEndTime"] = end_iso
+    if td.get("validationStartTime") or report.get("validationStartTime"):
+        td["validationEndTime"] = end_iso
+    report["testData"] = td
+    report["completedAt"] = report.get("completedAt") or end_iso
+    report["durationSeconds"] = duration
+    report["durationSec"] = duration
+
+    val_runs = td.get("validationRuns")
+    if isinstance(val_runs, list):
+        for idx, run in enumerate(val_runs):
+            if not isinstance(run, dict):
+                continue
+            run = dict(run)
+            run_existing = None
+            try:
+                if run.get("durationSec") is not None:
+                    run_existing = max(0, int(run.get("durationSec")))
+            except (TypeError, ValueError):
+                run_existing = None
+            run_duration = duration if (run_existing is None or run_existing == 0) else max(run_existing, duration)
+            run["durationSec"] = run_duration
+            run["durationSeconds"] = run_duration
+            run["validationDurationSec"] = run_duration
+            run["completedAt"] = run.get("completedAt") or end_iso
+            val_runs[idx] = run
+        td["validationRuns"] = val_runs
+        report["testData"] = td
+        if isinstance(report.get("validationRuns"), list):
+            report["validationRuns"] = val_runs
+
+    try:
+        recipe = report.get("recipe") if isinstance(report.get("recipe"), dict) else {}
+        if str(report.get("type") or "").strip().lower() == "test":
+            report["reportDerived"] = report_service.build_test_report_derived(
+                td, recipe, report.get("id")
+            )
+    except Exception:
+        app.logger.exception("Failed to refresh reportDerived after power-cut duration stamp")
+    return report
+
+
 def _apply_power_interruption_finalize_to_report(report: dict) -> dict:
     """Finalize a report after power loss: Completed, system-approved, Pass/Fail FAIL."""
+    report = _stamp_power_cut_run_duration(report)
     report = dict(report or {})
     td = report.get("testData")
     if not isinstance(td, dict):
@@ -413,6 +534,19 @@ def _apply_power_interruption_finalize_to_report(report: dict) -> dict:
         report["validationRuns"] = val_runs_top
     if not report.get("completedAt"):
         report["completedAt"] = _utc_now_iso()
+    report.pop("_checkpointAt", None)
+    report.pop("_checkpointSavedAt", None)
+    report.pop("_checkpointPhase", None)
+    report.pop("_pendingReportId", None)
+    try:
+        if str(report.get("type") or "").strip().lower() == "test":
+            recipe = report.get("recipe") if isinstance(report.get("recipe"), dict) else {}
+            td_final = report.get("testData") if isinstance(report.get("testData"), dict) else {}
+            report["reportDerived"] = report_service.build_test_report_derived(
+                td_final, recipe, report.get("id")
+            )
+    except Exception:
+        app.logger.exception("Failed to refresh reportDerived after power-interruption finalize")
     return report
 
 
@@ -641,7 +775,9 @@ def _create_aborted_report_from_power_loss_checkpoint(session_username=None):
         return 0
     td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
     report_data = dict(cp)
-    for k in ("_checkpointAt", "_checkpointPhase", "_pendingReportId"):
+    # Keep checkpoint timestamps available for duration stamping, then strip meta keys.
+    enriched_input = dict(report_data)
+    for k in ("_checkpointAt", "_checkpointPhase", "_pendingReportId", "_checkpointSavedAt"):
         report_data.pop(k, None)
     recipe = report_data.get("recipe") or (td.get("recipe") if isinstance(td, dict) else None)
     enriched = report_service.generate_report(
@@ -649,6 +785,10 @@ def _create_aborted_report_from_power_loss_checkpoint(session_username=None):
         recipe=recipe,
         factory_settings=report_data.get("factorySettings"),
     )
+    # Preserve checkpoint timing meta for duration resolution during finalize.
+    for k in ("_checkpointAt", "_checkpointSavedAt"):
+        if enriched_input.get(k) and not enriched.get(k):
+            enriched[k] = enriched_input.get(k)
     enriched = _stamp_report_operator(enriched)
     # Mid-test cut (still running / completed checkpoint) → power interruption.
     # Operator-abort checkpoint (status already aborted) → keep Aborted.

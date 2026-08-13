@@ -371,6 +371,28 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
         if expect_type == "validation" and str(td.get("status") or "").lower() != "fail":
             res.fail(f"{label}: testData.status not Fail")
             ok = False
+        dur = td.get("durationSeconds")
+        if dur is None:
+            dur = td.get("durationSec")
+        try:
+            dur_n = int(dur) if dur is not None else -1
+        except (TypeError, ValueError):
+            dur_n = -1
+        if expect_type == "test" and dur_n < 30:
+            res.fail(f"{label}: durationSeconds {dur!r} expected >= 30")
+            ok = False
+        if expect_type == "validation" and dur_n < 12:
+            res.fail(f"{label}: durationSec {dur!r} expected >= 12")
+            ok = False
+        derived = report.get("reportDerived") or {}
+        if expect_type == "test" and derived:
+            try:
+                if int(derived.get("durationSeconds") or -1) < 30:
+                    res.fail(f"{label}: reportDerived.durationSeconds not preserved")
+                    ok = False
+            except (TypeError, ValueError):
+                res.fail(f"{label}: reportDerived.durationSeconds invalid")
+                ok = False
         entries = audit_service.list_entries({"from": since_ms})
         pi = [e for e in entries if e.get("action") == "Power interruption"]
         if not pi:
@@ -398,6 +420,8 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
     test_cp = {
         "type": "test",
         "_checkpointPhase": "running",
+        "_checkpointAt": "2026-08-12T10:00:30",
+        "_checkpointSavedAt": "2026-08-12T10:00:30",
         "recipe": {
             "productName": "PowerCut Test",
             "batchNumber": "PC-1",
@@ -409,7 +433,9 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
             "productName": "PowerCut Test",
             "batchNumber": "PC-1",
             "elapsedSeconds": 30,
+            "durationSeconds": 30,
             "testStartTime": "2026-08-12T10:00:00",
+            "testEndTime": "2026-08-12T10:00:30",
         },
         "operatorName": TEST_USER,
         "operatedByUsername": TEST_USER,
@@ -419,8 +445,14 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
     val_cp = {
         "type": "validation",
         "_checkpointPhase": "running",
+        "_checkpointAt": "2026-08-12T10:00:12",
         "testData": {
             "status": "running",
+            "durationSec": 12,
+            "durationSeconds": 12,
+            "elapsedSeconds": 12,
+            "validationStartTime": "2026-08-12T10:00:00",
+            "testStartTime": "2026-08-12T10:00:00",
             "validationRuns": [
                 {
                     "usp": "USP",
@@ -428,6 +460,8 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
                     "status": "Running",
                     "actualRotationCount": 5,
                     "expectedRotationCount": 100,
+                    "durationSec": 12,
+                    "validationStartTime": "2026-08-12T10:00:00",
                 }
             ],
         },

@@ -159,10 +159,7 @@
             currentInput.value = val.substring(0, val.length - 1);
             updatePopup();
         } else if (key === 'enter') {
-            // Enter - fire change so onchange handlers (e.g. num-sieves) run, then close
-            try {
-                currentInput.dispatchEvent(new Event('change', { bubbles: true }));
-            } catch (e) {}
+            // Enter - close keyboard
             closeOSK();
         } else if (key === 'space') {
             // Space
@@ -187,15 +184,7 @@
                 var allowDecimal = _inputWantsDecimalKeyboard(currentInput);
                 if (key === '.' || key === ',') {
                     if (!allowDecimal || currentInput.value.indexOf('.') >= 0) return;
-                    if (!currentInput.value) {
-                        currentInput.value = '0.';
-                    } else {
-                        currentInput.value += '.';
-                    }
-                    updatePopup();
-                    var decimalEvent = new Event('input', { bubbles: true });
-                    currentInput.dispatchEvent(decimalEvent);
-                    return;
+                    key = '.';
                 } else if (!/^\d$/.test(key)) {
                     return;
                 }

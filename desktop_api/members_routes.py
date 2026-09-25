@@ -188,6 +188,8 @@ def register_members_routes(bp, kiosk):
                 )
                 return jsonify({"error": verify_err}), 403
             before_member = dict(member)
+            disabled_by = str(user.get("username") or user.get("name") or "--").strip() or "--"
+            disabled_user = str(member.get("username") or member.get("name") or "--").strip() or "--"
             template_id = member.get("fingerprintTemplateId")
             if template_id is not None:
                 try:
@@ -233,7 +235,7 @@ def register_members_routes(bp, kiosk):
                 entity_type="member",
                 entity_id=member_id,
                 entity_name=member.get("username") or member.get("name") or "",
-                details="Member disabled",
+                details="{} disabled {}".format(disabled_by, disabled_user),
                 target_user=member.get("username") or "",
                 before=before_member,
                 after=member,
@@ -242,7 +244,11 @@ def register_members_routes(bp, kiosk):
                     "username": verified.get("username"),
                     "role": verified.get("role"),
                 },
-                extra={"templateIdFreed": template_id},
+                extra={
+                    "templateIdFreed": template_id,
+                    "disabledBy": disabled_by,
+                    "disabledUser": disabled_user,
+                },
             )
             return jsonify({"success": True, "member": member}), 200
         except ValueError as e:
@@ -255,6 +261,10 @@ def register_members_routes(bp, kiosk):
     def desktop_members_unlock(user, member_id):
         try:
             before_member = data_service.get_member(member_id)
+            unlocked_by = str(user.get("username") or user.get("name") or "--").strip() or "--"
+            unlocked_user = str(
+                (before_member or {}).get("username") or (before_member or {}).get("name") or "--"
+            ).strip() or "--"
             sig = auth_store.desktop_signature(user)
             member = data_service.unlock_member(member_id)
             audit_event(
@@ -265,11 +275,82 @@ def register_members_routes(bp, kiosk):
                 entity_type="member",
                 entity_id=member_id,
                 entity_name=member.get("username") or member.get("name") or "",
-                details="Member unlocked",
+                details="{} unlocked {}".format(unlocked_by, unlocked_user),
                 target_user=member.get("username") or "",
                 before=data_service.sanitize_member_for_client(before_member) if before_member else None,
                 after=data_service.sanitize_member_for_client(member) or member,
                 signature=sig,
+                extra={"unlockedBy": unlocked_by, "unlockedUser": unlocked_user},
+            )
+            safe = data_service.sanitize_member_for_client(member) or dict(member)
+            return jsonify({"success": True, "member": safe}), 200
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @bp.route("/members/<int:member_id>/disable", methods=["POST"])
+    @auth_store.require_internal("user-delete")
+    def desktop_members_disable(user, member_id):
+        try:
+            member = data_service.get_member(member_id)
+            if not member:
+                return jsonify({"error": "Member not found"}), 404
+            before_member = dict(member)
+            disabled_by = str(user.get("username") or user.get("name") or "--").strip() or "--"
+            disabled_user = str(member.get("username") or member.get("name") or "--").strip() or "--"
+            sig = auth_store.desktop_signature(user)
+            template_id = member.get("fingerprintTemplateId")
+            if template_id is not None:
+                try:
+                    import biometric_service
+
+                    deleted = biometric_service.delete_template(template_id)
+                    if not deleted.get("ok"):
+                        audit_event(
+                            kiosk,
+                            user,
+                            action="User disable",
+                            outcome="failed",
+                            entity_type="member",
+                            entity_id=member_id,
+                            entity_name=member.get("username") or member.get("name") or "",
+                            details=deleted.get("error")
+                            or "Failed to delete fingerprint template from sensor",
+                            target_user=member.get("username") or "",
+                            before=before_member,
+                            signature=sig,
+                            extra={"templateId": template_id},
+                        )
+                        return jsonify(
+                            {
+                                "error": deleted.get("error")
+                                or "Failed to delete fingerprint template from sensor",
+                                "templateId": int(template_id),
+                            }
+                        ), 400
+                    data_service.clear_member_biometric(member_id)
+                except ImportError:
+                    pass
+            member = data_service.disable_member(member_id)
+            audit_event(
+                kiosk,
+                user,
+                action="User disable",
+                outcome="success",
+                entity_type="member",
+                entity_id=member_id,
+                entity_name=member.get("username") or member.get("name") or "",
+                details="{} disabled {}".format(disabled_by, disabled_user),
+                target_user=member.get("username") or "",
+                before=before_member,
+                after=member,
+                signature=sig,
+                extra={
+                    "templateIdFreed": template_id,
+                    "disabledBy": disabled_by,
+                    "disabledUser": disabled_user,
+                },
             )
             safe = data_service.sanitize_member_for_client(member) or dict(member)
             return jsonify({"success": True, "member": safe}), 200
@@ -283,6 +364,12 @@ def register_members_routes(bp, kiosk):
     def desktop_members_enable(user, member_id):
         try:
             before_member = data_service.get_member(member_id)
+            enabled_by = str(user.get("username") or user.get("name") or "--").strip() or "--"
+            enabled_user = str(
+                (before_member or {}).get("username")
+                or (before_member or {}).get("name")
+                or "--"
+            ).strip() or "--"
             sig = auth_store.desktop_signature(user)
             member = data_service.enable_member(member_id)
             audit_event(
@@ -293,11 +380,12 @@ def register_members_routes(bp, kiosk):
                 entity_type="member",
                 entity_id=member_id,
                 entity_name=member.get("username") or member.get("name") or "",
-                details="Member enabled",
+                details="{} enabled {}".format(enabled_by, enabled_user),
                 target_user=member.get("username") or "",
                 before=data_service.sanitize_member_for_client(before_member) if before_member else None,
                 after=data_service.sanitize_member_for_client(member) or member,
                 signature=sig,
+                extra={"enabledBy": enabled_by, "enabledUser": enabled_user},
             )
             safe = data_service.sanitize_member_for_client(member) or dict(member)
             return jsonify({"success": True, "member": safe}), 200
@@ -412,22 +500,31 @@ def register_members_routes(bp, kiosk):
                     return jsonify({"ok": False, "error": "Username and password are required"}), 400
                 verifier = data_service.authenticate_user(username, password)
                 if not verifier:
+                    attempted = username or "--"
+                    member = data_service.get_member_by_username(username)
+                    attempted_role = str((member or {}).get("role") or "--").strip() or "--"
+                    attempted_name = str((member or {}).get("name") or attempted).strip() or attempted
                     audit_event(
                         kiosk,
-                        user,
+                        {
+                            "username": attempted,
+                            "name": attempted_name,
+                            "role": attempted_role,
+                        },
                         action="Approval verification",
                         outcome="failed",
                         entity_type="verification",
                         entity_name=purpose,
-                        details="Invalid credentials",
-                        target_user=username,
-                        extra={"purpose": purpose, "attemptedUser": username, "method": "credentials"},
+                        details="{} entered wrong password".format(attempted),
+                        target_user=attempted,
+                        extra={"purpose": purpose, "attemptedUser": attempted, "method": "credentials"},
                     )
                     return jsonify({"ok": False, "error": "Invalid verifier username or password"}), 401
             else:
                 return jsonify({"ok": False, "error": "Unsupported verification method"}), 400
 
             verifier_role = str(verifier.get("role") or "").strip().lower()
+            report_type_for_verify = None
             eligible_fn = getattr(kiosk, "_approval_verifier_eligible_for_recipe", None)
             if purpose == "recipe":
                 if eligible_fn:
@@ -435,10 +532,14 @@ def register_members_routes(bp, kiosk):
                 else:
                     eligible = auth_store._verifier_payload_has_internal(verifier, "recipe-approve")
             elif purpose == "report":
+                report_type_for_verify = auth_store._resolve_report_type_for_approval_verify(payload)
                 fn = getattr(kiosk, "_approval_verifier_eligible_for_report", None)
-                eligible = fn(verifier) if fn else auth_store._verifier_payload_has_internal(
-                    verifier, "test-report-approve"
-                )
+                if fn:
+                    eligible = fn(verifier, report_type_for_verify)
+                else:
+                    eligible = auth_store._verifier_payload_has_internal(
+                        verifier, auth_store._report_approval_internal_key(report_type_for_verify)
+                    )
             elif purpose == "export":
                 eligible = auth_store._verifier_payload_has_internal(verifier, "export-approve")
             else:
@@ -481,7 +582,11 @@ def register_members_routes(bp, kiosk):
                         )
                         return jsonify({"ok": False, "error": "Verifier account is not active"}), 403
 
-            token, token_payload = auth_store.issue_approval_verify_token(verifier, purpose)
+            token, token_payload = auth_store.issue_approval_verify_token(
+                verifier,
+                purpose,
+                report_type=report_type_for_verify if purpose == "report" else None,
+            )
             vname = verifier.get("username") or username
             audit_event(
                 kiosk,

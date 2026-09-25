@@ -4,11 +4,6 @@ set -euo pipefail
 
 KIOSK_URL="${KIOSK_URL:-http://127.0.0.1:5000/}"
 KIOSK_URL="${KIOSK_URL%/}/"
-APP_ROOT="${APP_ROOT:-/opt/kiosk}"
-DISPLAY_WIDTH="${DISPLAY_WIDTH:-1024}"
-DISPLAY_HEIGHT="${DISPLAY_HEIGHT:-600}"
-DISPLAY_ROTATION="${DISPLAY_ROTATION:-normal}"
-CHROMIUM_OZONE_PLATFORM="${CHROMIUM_OZONE_PLATFORM:-auto}"
 CHROME_BIN=""
 if command -v chromium >/dev/null 2>&1; then
   CHROME_BIN="chromium"
@@ -18,40 +13,6 @@ else
   echo "chromium not found" >&2
   exit 1
 fi
-
-detect_ozone_platform() {
-  if [[ "$CHROMIUM_OZONE_PLATFORM" != "auto" ]]; then
-    printf '%s' "$CHROMIUM_OZONE_PLATFORM"
-    return
-  fi
-  # VNC / remote X sessions need X11. Native labwc/Wayland kiosk must use Wayland
-  # so Chromium --kiosk is truly borderless (XWayland often keeps a title strip).
-  if [[ -n "${VNCSESSION:-}" || -n "${VNCDESKTOP:-}" ]]; then
-    printf 'x11'
-    return
-  fi
-  if [[ "${XDG_SESSION_TYPE:-}" == "wayland" || -n "${WAYLAND_DISPLAY:-}" ]]; then
-    printf 'wayland'
-    return
-  fi
-  if [[ -n "${DISPLAY:-}" ]]; then
-    printf 'x11'
-    return
-  fi
-  printf 'wayland'
-}
-
-force_desktop_size() {
-  if [[ -x "$APP_ROOT/scripts/force_display_mode.sh" ]]; then
-    # Hard fail-open: retries live inside the script; never block Chromium forever.
-    env \
-      DISPLAY_WIDTH="$DISPLAY_WIDTH" \
-      DISPLAY_HEIGHT="$DISPLAY_HEIGHT" \
-      DISPLAY_ROTATION="$DISPLAY_ROTATION" \
-      DISPLAY_FORCE_RETRIES="${DISPLAY_FORCE_RETRIES:-6}" \
-      "$APP_ROOT/scripts/force_display_mode.sh" || true
-  fi
-}
 
 # Wait until HTML, health, AND styles.css are actually servable.
 # Waiting only for GET / caused intermittent unstyled launches: Chromium opened as soon as
@@ -79,7 +40,7 @@ wait_for_kiosk_assets() {
 }
 
 chrome_running() {
-  pgrep -f -- "$CHROME_BIN.*--kiosk.*${KIOSK_URL%/}" >/dev/null 2>&1
+  pgrep -f -- "$CHROME_BIN.*--app=${KIOSK_URL%/}" >/dev/null 2>&1
 }
 
 # If API drops after power flaps, kill Chromium so the outer loop can reopen a healthy page.
@@ -92,9 +53,9 @@ watch_api_and_recycle_chrome() {
       down=$((down + 1))
       if (( down >= 3 )) && chrome_running; then
         echo "launch_chromium_kiosk: API unreachable; recycling Chromium" >&2
-        pkill -TERM -f -- "$CHROME_BIN.*--kiosk.*${KIOSK_URL%/}" >/dev/null 2>&1 || true
+        pkill -TERM -f -- "$CHROME_BIN.*--app=${KIOSK_URL%/}" >/dev/null 2>&1 || true
         sleep 1
-        pkill -KILL -f -- "$CHROME_BIN.*--kiosk.*${KIOSK_URL%/}" >/dev/null 2>&1 || true
+        pkill -KILL -f -- "$CHROME_BIN.*--app=${KIOSK_URL%/}" >/dev/null 2>&1 || true
         down=0
       fi
     fi
@@ -114,14 +75,11 @@ trap 'kill "$WATCH_PID" 2>/dev/null || true' EXIT
 # Keep reopening Chromium after API outages / chrome exits so the UI recovers after power cycles.
 while true; do
   wait_for_kiosk_assets
-  force_desktop_size
   if chrome_running; then
     # Another launcher won the race; stay as watchdog only.
     wait "$WATCH_PID" || true
     exit 0
   fi
-  OZONE_PLATFORM="$(detect_ozone_platform)"
-  # No --app= (that restores a titled window chrome). Plain --kiosk + ozone platform.
   "$CHROME_BIN" \
     --start-fullscreen \
     --noerrdialogs \
@@ -132,10 +90,9 @@ while true; do
     --kiosk \
     --incognito \
     --disable-session-crashed-bubble \
-    --disable-features=TranslateUI,Translate,BackForwardCache \
-    --ozone-platform="${OZONE_PLATFORM}" \
-    --window-size="${DISPLAY_WIDTH},${DISPLAY_HEIGHT}" \
-    --window-position=0,0 \
-    "${KIOSK_URL%/}" || true
+    --disable-features=TranslateUI \
+    --ozone-platform="${CHROMIUM_OZONE_PLATFORM:-wayland}" \
+    --window-size=1024,600 \
+    --app="${KIOSK_URL%/}" || true
   sleep 1
 done

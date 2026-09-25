@@ -94,8 +94,7 @@ def _sanitize_audit_payload(value):
     if isinstance(value, dict):
         out = {}
         for k, v in value.items():
-            key_l = str(k).lower()
-            if key_l in ("password", "creationpasswordsalt", "creationpasswordhash", "passwordhistory"):
+            if str(k).lower() in ("password",):
                 out[k] = "***"
             else:
                 out[k] = _sanitize_audit_payload(v)
@@ -113,11 +112,21 @@ def _changed_fields(before_obj, after_obj):
 
 
 def audit_event(kiosk, user, **kwargs):
-    """Structured audit attributed to the desktop Bearer user (not kiosk touchscreen session)."""
+    """Structured audit with desktop user as actor (does not use kiosk session)."""
+    fn = getattr(kiosk, "_audit_event", None)
+    if fn:
+        sig = kwargs.get("signature") or desktop_signature(user)
+        kwargs["signature"] = sig
+        kwargs["actor_override"] = {
+            "user": (user or {}).get("username") or (user or {}).get("name") or "--",
+            "role": (user or {}).get("role") or "--",
+            "name": (user or {}).get("name") or (user or {}).get("username") or "--",
+        }
+        return fn(**kwargs)
+
     audit_time = _audit_time_fields(kiosk)
     u = (user or {}).get("username") or (user or {}).get("name") or "--"
     r = (user or {}).get("role") or "--"
-    sig = kwargs.get("signature") or desktop_signature(user)
     before_clean = _sanitize_audit_payload(kwargs.get("before"))
     after_clean = _sanitize_audit_payload(kwargs.get("after"))
     audit_service.log_structured_event(
@@ -134,9 +143,9 @@ def audit_event(kiosk, user, **kwargs):
         session_user=u,
         session_role=r,
         target_user=kwargs.get("target_user") or "",
-        signature_mode=(sig or {}).get("mode") or "desktop",
-        signature_user=(sig or {}).get("username") or u,
-        signature_role=(sig or {}).get("role") or r,
+        signature_mode=(kwargs.get("signature") or {}).get("mode") or "desktop",
+        signature_user=(kwargs.get("signature") or {}).get("username") or u,
+        signature_role=(kwargs.get("signature") or {}).get("role") or r,
         changed_fields=_changed_fields(
             before_clean if isinstance(before_clean, dict) else {},
             after_clean if isinstance(after_clean, dict) else {},
@@ -200,6 +209,6 @@ def prepare_desktop_created_member(member_id: int, initial_password: str):
     patch["mustChangePassword"] = False
     patch["failedAttempts"] = 0
     patch["status"] = "active"
-    # Keep creationPasswordHash so initial admin-assigned password cannot be reused.
+    data_service._clear_creation_password_commitment(patch)
     data_service._save_member_record(patch)
     return patch

@@ -82,7 +82,6 @@
             if(node.nodeType===1) {
               attachHandlers(node);
               attachOSKDoubleTapHandlers(node);
-              if(typeof attachInputFocusHandlers === 'function') attachInputFocusHandlers(node);
             }
           });
         }

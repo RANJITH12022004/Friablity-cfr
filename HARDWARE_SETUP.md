@@ -1,10 +1,6 @@
-# Hardware Setup - Sieve Shaker CFR (RSS-2B)
+# Hardware Setup - Tablet Hardness Tester
 
-Pin mapping and configuration for Raspberry Pi connectivity with the AC dimmer MCU, printers, and RTC.
-
-The shaker uses a **4-character UART frame** protocol (`#NNC` / `#NNI`) documented in [shaker_firmware.txt](shaker_firmware.txt). Default baud: **9600**, device: **`/dev/serial0`**.
-
-Probe communication: `python3 scripts/shaker_comm_probe.py`
+Pin mapping and configuration for Raspberry Pi connectivity with ESP32, printers, and RTC.
 
 ---
 

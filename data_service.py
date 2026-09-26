@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import secrets
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 
@@ -237,32 +238,58 @@ def _load_json_file(filepath: pathlib.Path, default=None):
         return default
 
 
+_json_write_lock = threading.Lock()
+_json_tmp_seq = 0
+
+
 def _save_json_file(filepath: pathlib.Path, data):
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    """Replace JSON in place. Never truncate the destination first (FAT power loss leaves a 0-byte file)."""
+    _save_json_file_durable(filepath, data)
 
 
 def _save_json_file_durable(filepath: pathlib.Path, data):
-    """Atomic replace + fsync so sudden power loss keeps the last complete checkpoint."""
+    """Atomic replace + fsync so sudden power loss keeps the last complete JSON file.
+
+    Each write uses its own temp name. Sharing one test_run.json.tmp across the
+    overlapping checkpoint requests from the kiosk UI deletes the temp file
+    before replace and leaves a 0-byte checkpoint, which power-cut recovery skips.
+    """
+    filepath = pathlib.Path(filepath)
     filepath.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = filepath.with_suffix(filepath.suffix + ".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.flush()
+    payload = json.dumps(data, indent=2, ensure_ascii=False)
+    if not payload:
+        raise ValueError("Refusing to replace {} with empty JSON".format(filepath.name))
+    if not payload.endswith("\n"):
+        payload += "\n"
+    global _json_tmp_seq
+    with _json_write_lock:
+        _json_tmp_seq += 1
+        tmp_path = filepath.parent / ".{}.{}.{}.tmp".format(
+            filepath.name, os.getpid(), _json_tmp_seq
+        )
         try:
-            os.fsync(f.fileno())
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            os.replace(tmp_path, filepath)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+        try:
+            dir_fd = os.open(str(filepath.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
         except OSError:
             pass
-    os.replace(tmp_path, filepath)
-    try:
-        dir_fd = os.open(str(filepath.parent), os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    except OSError:
-        pass
 
 
 # =================== RECIPE OPERATIONS ==========================
@@ -1319,14 +1346,22 @@ _APP_CLEAN_STOP_FLAG = "app_clean_stop.flag"
 
 
 def write_session_power_audit_pending(user: Dict[str, Any]):
-    """Mark an open logged-in session for unclean-shutdown detection on next process start."""
+    """Mark an open logged-in session for unclean-shutdown detection on next process start.
+
+    A new session also clears a leftover clean-stop flag. That flag is written on
+    logout while this process keeps running; leaving it set made the next power
+    cut look like an orderly shutdown.
+    """
     path = _get_storage_path(_SESSION_POWER_AUDIT_PENDING)
     payload = {
         "username": (user.get("username") or user.get("name") or "").strip(),
         "role": (user.get("role") or "").strip(),
         "ts_ms": int(datetime.now().timestamp() * 1000),
     }
+    if user.get("powerAuditLogged"):
+        payload["powerAuditLogged"] = True
     _save_json_file(path, payload)
+    clear_app_clean_stop_flag()
 
 
 def read_session_power_audit_pending() -> Optional[Dict[str, Any]]:
@@ -1366,6 +1401,16 @@ def touch_app_clean_stop_flag():
         path.touch()
     except Exception:
         pass
+
+
+def clear_app_clean_stop_flag():
+    """Drop a clean-stop flag left behind by logout while the process is still running."""
+    path = _get_storage_path(_APP_CLEAN_STOP_FLAG)
+    if path.exists():
+        try:
+            path.unlink()
+        except Exception:
+            pass
 
 
 # =================== TEST RUN DATA ==========================

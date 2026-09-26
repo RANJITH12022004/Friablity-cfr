@@ -841,22 +841,73 @@ def _create_aborted_report_from_power_loss_checkpoint(session_username=None):
     return 1
 
 
+def _session_pending_from_checkpoint(cp: dict) -> dict:
+    """Operator stamp stored on the test checkpoint, used when the session file was cleared."""
+    td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+    username = str(
+        cp.get("operatedByUsername")
+        or cp.get("operatorName")
+        or td.get("operatedByUsername")
+        or td.get("operatorName")
+        or ""
+    ).strip()
+    role = str(cp.get("operatedByRole") or td.get("operatedByRole") or "").strip()
+    return {"username": username, "role": role}
+
+
+def _mark_open_test_for_power_cut(body: dict) -> None:
+    """Test start is an open session: keep a power-cut marker until the run ends or is aborted."""
+    user = data_service.get_current_user() or {}
+    td = body.get("testData") if isinstance(body.get("testData"), dict) else {}
+    username = str(
+        user.get("username")
+        or user.get("name")
+        or body.get("operatedByUsername")
+        or body.get("operatorName")
+        or td.get("operatedByUsername")
+        or td.get("operatorName")
+        or ""
+    ).strip()
+    role = str(user.get("role") or body.get("operatedByRole") or td.get("operatedByRole") or "").strip()
+    if username or role:
+        data_service.write_session_power_audit_pending({"username": username, "role": role})
+    else:
+        data_service.clear_app_clean_stop_flag()
+
+
 def _startup_session_power_audit():
     """If the last run ended without a clean stop while a session was active, log one power-interruption row."""
     try:
         had_clean_shutdown = data_service.consume_app_clean_stop_flag()
         pending = data_service.read_session_power_audit_pending()
         checkpoint_recoverable = _has_recoverable_test_run_checkpoint()
+        checkpoint_snapshot = data_service.get_test_run_data() if checkpoint_recoverable else None
+        operator_abort = (
+            _report_abort_cause(checkpoint_snapshot) == ABORT_CAUSE_OPERATOR
+            if isinstance(checkpoint_snapshot, dict)
+            else False
+        )
         # In-progress checkpoints always finalize — a leftover clean-stop flag (or SIGTERM
         # that precedes hard power loss) must not drop a live test/validation report.
         should_finalize_checkpoint = checkpoint_recoverable
         # Pending-approval reports stay pending across intentional clean restarts.
         should_finalize_pending = not had_clean_shutdown
-        should_log_power_logout = (
-            bool(pending)
-            and not pending.get("powerAuditLogged")
-            and (should_finalize_checkpoint or should_finalize_pending)
+        # A started test that was neither finished nor operator-aborted is an open session,
+        # even when logout left a clean-stop flag or the browser cleared the session file.
+        should_log_power_logout = (not operator_abort) and (
+            checkpoint_recoverable
+            or (
+                bool(pending)
+                and not pending.get("powerAuditLogged")
+                and should_finalize_pending
+            )
         )
+        if should_log_power_logout and not pending:
+            pending = (
+                _session_pending_from_checkpoint(checkpoint_snapshot)
+                if isinstance(checkpoint_snapshot, dict)
+                else {"username": "", "role": ""}
+            )
         if should_finalize_checkpoint or should_finalize_pending:
             try:
                 n_pending = 0
@@ -2005,6 +2056,11 @@ def put_test_run_checkpoint():
                 "Checkpoint saved without persisted session file (header session restore may apply)"
             )
         data_service.save_test_run_data(body)
+        phase = str(body.get("_checkpointPhase") or "").strip().lower()
+        td = body.get("testData") if isinstance(body.get("testData"), dict) else {}
+        status = str(td.get("status") or "").strip().lower()
+        if phase in _RECOVERABLE_CHECKPOINT_PHASES or status in ("running", "completed", "aborted"):
+            _mark_open_test_for_power_cut(body)
         return jsonify({"ok": True}), 200
     except Exception as e:
         app.logger.exception("Error saving test run checkpoint")
@@ -3316,8 +3372,11 @@ def logout():
         user = data_service.get_current_user()
         if user:
             _audit_session_logout(user, reason, request_source="POST /api/data/auth/logout")
-        data_service.touch_app_clean_stop_flag()
-        data_service.delete_session_power_audit_pending()
+        # A test that is still running must survive logout. The clean-stop flag
+        # otherwise makes the next power cut look intentional and drops the report.
+        if not _has_recoverable_test_run_checkpoint():
+            data_service.touch_app_clean_stop_flag()
+            data_service.delete_session_power_audit_pending()
         data_service.clear_current_user()
         return jsonify({"success": True}), 200
     except Exception as e:
@@ -3333,6 +3392,11 @@ def session_ui_reset():
     so audit trails do not show the prior session as still active after re-login.
     """
     try:
+        # Browser reload must not erase an in-progress test. Recovery reads that
+        # checkpoint on the next start and writes the system-approved report.
+        if _has_recoverable_test_run_checkpoint():
+            data_service.clear_current_user()
+            return jsonify({"success": True, "checkpointKept": True}), 200
         user = data_service.get_current_user()
         if user:
             _audit_session_logout(

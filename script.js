@@ -1108,7 +1108,7 @@ function unlockReportPreviewAfterServerStatus(preview, reportId, options) {
         if (reportId != null) _saveReportPdfSilent(reportId);
         if (options.showModal !== false) {
             var approvedMsg = isPowerInterruptionAbortPreview(preview)
-                ? 'This report was completed after a power interruption and approved by System (Fail). You may print or leave this screen.'
+                ? 'This report was aborted after a power interruption and approved by System. You may print or leave this screen.'
                 : 'Report has been approved. You may now print or leave this screen.';
             showAppModal(approvedMsg, 'Report');
         }

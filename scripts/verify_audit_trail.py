@@ -350,8 +350,8 @@ def verify_power_cut_report_recovery(res: RunResult) -> None:
         if report.get("type") != expect_type:
             res.fail(f"{label}: report type {report.get('type')!r} != {expect_type!r}")
             ok = False
-        if str(report.get("status") or "") != "Completed":
-            res.fail(f"{label}: status {report.get('status')!r} != Completed")
+        if str(report.get("status") or "") != "Aborted":
+            res.fail(f"{label}: status {report.get('status')!r} != Aborted")
             ok = False
         if str(report.get("reportApprovalStatus") or "").lower() != "approved":
             res.fail(f"{label}: reportApprovalStatus not approved")

@@ -1319,10 +1319,11 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
         if not isinstance(recipe, dict):
             recipe = {}
         status_raw = str(td.get("status", "")).lower() if isinstance(td, dict) else ""
-        if status_raw == "aborted":
+        if status_raw == "aborted" or _is_power_interruption_report(
+            report_data if isinstance(report_data, dict) else {},
+            td if isinstance(td, dict) else {},
+        ):
             status_label = "Aborted"
-        elif _is_power_interruption_report(report_data if isinstance(report_data, dict) else {}, td if isinstance(td, dict) else {}):
-            status_label = "Completed"
         else:
             status_label = "Completed" if status_raw == "completed" else (status_raw.title() if status_raw else "--")
         derived = report_data.get("reportDerived")

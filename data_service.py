@@ -5,6 +5,7 @@ Handles CRUD for recipes, reports, members, and factory settings.
 All data stored as JSON files under STORAGE_DIR.
 """
 
+import fcntl
 import hashlib
 import hmac
 import json
@@ -264,9 +265,9 @@ def _save_json_file_durable(filepath: pathlib.Path, data):
     global _json_tmp_seq
     with _json_write_lock:
         _json_tmp_seq += 1
-        tmp_path = filepath.parent / ".{}.{}.{}.tmp".format(
-            filepath.name, os.getpid(), _json_tmp_seq
-        )
+        # Plain names. A temp name that looks like the destination can share a FAT
+        # short-name entry, and unlinking that temp then deletes the saved file.
+        tmp_path = filepath.parent / "w{}-{}.tmp".format(os.getpid(), _json_tmp_seq)
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 f.write(payload)
@@ -276,6 +277,8 @@ def _save_json_file_durable(filepath: pathlib.Path, data):
                 except OSError:
                     pass
             os.replace(tmp_path, filepath)
+            if not filepath.is_file() or filepath.stat().st_size <= 0:
+                raise OSError("JSON replace left {} empty".format(filepath.name))
         finally:
             if tmp_path.exists():
                 try:
@@ -1399,6 +1402,34 @@ def touch_app_clean_stop_flag():
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()
+    except Exception:
+        pass
+
+
+def acquire_storage_lock():
+    """Exclusive lock so two bridge processes cannot recover or rewrite the same JSON file."""
+    if _storage_dir is None:
+        return None
+    _storage_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = _storage_dir / ".storage.lock"
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def release_storage_lock(fd):
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        os.close(fd)
     except Exception:
         pass
 

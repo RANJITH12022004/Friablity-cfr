@@ -520,7 +520,7 @@ def _apply_power_interruption_finalize_to_report(report: dict) -> dict:
     if rtype == "validation":
         td["status"] = "Fail"
     else:
-        td["status"] = "completed"
+        td["status"] = "aborted"
     results = td.get("stepResults")
     if isinstance(results, list):
         drum_pf = {}
@@ -549,7 +549,7 @@ def _apply_power_interruption_finalize_to_report(report: dict) -> dict:
         td["validationRuns"] = val_runs
     td["remarks"] = POWER_INTERRUPTION_REMARKS
     report["testData"] = td
-    report["status"] = "Completed"
+    report["status"] = "Aborted"
     report["remarks"] = POWER_INTERRUPTION_REMARKS
     report["approvalRemarks"] = POWER_INTERRUPTION_REMARKS
     report["abortCause"] = ABORT_CAUSE_POWER
@@ -688,7 +688,7 @@ def _persist_unclean_shutdown_aborted_report(report: dict, *, force_power_interr
     """Save unclean-shutdown report and write print artifacts.
 
     Operator-aborted pending reports stay labeled Aborted.
-    Power interruption → Completed, system-approved, Pass/Fail FAIL.
+    Power interruption → Aborted, system-approved, with the checkpoint start and stop times.
     """
     if force_power_interruption or _report_abort_cause(report) != ABORT_CAUSE_OPERATOR:
         report = _apply_power_interruption_finalize_to_report(report)
@@ -732,7 +732,7 @@ def _audit_power_interruption_report(report: dict) -> None:
         or "--"
     )
     remarks = str(report.get("approvalRemarks") or report.get("remarks") or POWER_INTERRUPTION_REMARKS).strip()
-    detail = "{} | {} | operator {} | remarks: {} | status: Completed | approved by System".format(
+    detail = "{} | {} | operator {} | remarks: {} | status: Aborted | approved by System".format(
         ctx,
         rtype,
         operator,
@@ -877,7 +877,9 @@ def _mark_open_test_for_power_cut(body: dict) -> None:
 
 def _startup_session_power_audit():
     """If the last run ended without a clean stop while a session was active, log one power-interruption row."""
+    lock_fd = None
     try:
+        lock_fd = data_service.acquire_storage_lock()
         had_clean_shutdown = data_service.consume_app_clean_stop_flag()
         pending = data_service.read_session_power_audit_pending()
         checkpoint_recoverable = _has_recoverable_test_run_checkpoint()
@@ -974,6 +976,8 @@ def _startup_session_power_audit():
         data_service.clear_current_user()
     except Exception:
         app.logger.exception("Startup session power audit failed")
+    finally:
+        data_service.release_storage_lock(lock_fd)
 
 
 def _should_mark_clean_shutdown() -> bool:
@@ -1008,6 +1012,13 @@ def _register_clean_shutdown_signals():
                 data_service.touch_app_clean_stop_flag()
         except Exception:
             pass
+        # The previous handler swallowed SIGTERM, so systemd could not stop the
+        # process and a second bridge started and raced the report index.
+        try:
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+        except Exception:
+            os._exit(128 + int(signum))
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
@@ -2148,10 +2159,19 @@ def create_report():
         )
         if (enriched.get("type") or "").strip().lower() in ("test", "validation"):
             enriched = _stamp_report_operator(enriched)
-            # Aborted test/validation reports also require approval.
-            enriched["reportApprovalStatus"] = "pending"
-            for k in ("approvalPassFail", "approvalRemarks", "approvedBy", "approvedAt", "approvedByUsername"):
-                enriched.pop(k, None)
+            abort_cause = _report_abort_cause(report_data) or _report_abort_cause(enriched)
+            status_now = str(enriched.get("status") or report_data.get("status") or "").strip().lower()
+            if abort_cause == ABORT_CAUSE_OPERATOR or status_now == "aborted":
+                enriched = _apply_operator_abort_finalize_to_report(enriched)
+                enriched["reportApprovalStatus"] = "approved"
+                enriched["approvedBy"] = "System"
+                enriched["approvedByUsername"] = "system"
+                if not enriched.get("approvedAt"):
+                    enriched["approvedAt"] = _utc_now_iso()
+            else:
+                enriched["reportApprovalStatus"] = "pending"
+                for k in ("approvalPassFail", "approvalRemarks", "approvedBy", "approvedAt", "approvedByUsername"):
+                    enriched.pop(k, None)
         report_id = data_service.save_report(enriched)
         enriched = report_service.enrich_report_context({**enriched, "id": report_id})
         data_service.save_report(enriched)

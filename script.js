@@ -3303,6 +3303,7 @@ function _populateAuditFilterDropdowns(userEl, actionEl, fullList) {
         'USP 1 adapter error', 'USP 2 adapter error', 'Adapter check error',
         'Validation performed', 'Report saved', 'Report generated', 'Report approved',
         'Report aborted', 'Report aborted (power loss)', 'Report PDF generated',
+        'Audit trails viewed', 'Export completed',
         'Recipe created', 'Recipe edited', 'Recipe approved', 'Power interruption',
         'Approval verification', 'Disable Recipe', 'Recipe disabled',
         'Added new user', 'Password changed', 'User create', 'User update',
@@ -5153,7 +5154,8 @@ function enableMember(id) {
 }
 
 // ----- Reports and audit from API -----
-function loadReports(filterType) {
+function loadReports(filterType, opts) {
+    opts = opts || {};
     currentReportFilter = filterType || null;
     var tbody = document.getElementById('reports-table-body');
     var theadRow = document.getElementById('reports-thead-row');
@@ -5191,6 +5193,7 @@ function loadReports(filterType) {
             toTs = new Date(parseInt(parts2[0], 10), parseInt(parts2[1], 10) - 1, parseInt(parts2[2], 10), h2, m2, 59, 999).getTime();
         }
         var q = [];
+        if (opts.logView) q.push('log_view=1');
         if (userEl && userEl.value) q.push('user=' + encodeURIComponent(userEl.value));
         if (roleEl && roleEl.value) q.push('role=' + encodeURIComponent(roleEl.value));
         if (actionEl && actionEl.value) q.push('action=' + encodeURIComponent(actionEl.value));
@@ -5354,7 +5357,7 @@ function filterReports(type) {
     }
     var wasAudit = currentReportFilter === 'audit';
     var willAudit = type === 'audit';
-    loadReports(type);
+    loadReports(type, { logView: willAudit && !wasAudit });
     if (wasAudit === willAudit) return;
     if (willAudit) {
         _auditActivePage = 'audits';

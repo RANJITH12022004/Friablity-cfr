@@ -3837,6 +3837,33 @@ def _stage_audit_usb_export(cur, verifier, entry_ids, pdf_path=""):
     return export_id, exported_by, approved_by
 
 
+def _export_completed_detail(exported_by, approved_by, what):
+    """One line: who exported, who approved, and what left the instrument."""
+    ex = str((exported_by or {}).get("username") or "--").strip() or "--"
+    ap = str((approved_by or {}).get("username") or "--").strip() or "--"
+    return "{} exported | {} approved | {}".format(ex, ap, what)
+
+
+def _report_export_kind_summary(report_ids) -> str:
+    counts = {}
+    labels = {
+        "test": "test reports",
+        "validation": "validation reports",
+        "calibration": "calibration reports",
+    }
+    for rid in report_ids or []:
+        report = data_service.get_report(rid) or {}
+        kind = str(report.get("type") or "report").strip().lower() or "report"
+        counts[kind] = counts.get(kind, 0) + 1
+    if not counts:
+        return "reports"
+    parts = []
+    for kind in sorted(counts.keys()):
+        label = labels.get(kind) or "{} reports".format(kind)
+        parts.append("{} {}".format(counts[kind], label))
+    return ", ".join(parts)
+
+
 def _format_export_actors_detail(exported_by, approved_by):
     ex_u = (exported_by or {}).get("username") or "--"
     ex_e = (exported_by or {}).get("employee_id") or "--"
@@ -3912,11 +3939,12 @@ def get_audit_log():
             return jsonify({"error": "Forbidden. You do not have permission to view the audit log."}), 403
 
         if str(request.args.get("log_view") or "").strip() == "1":
+            viewer = str(cur.get("username") or cur.get("name") or "--").strip() or "--"
             _audit(
-                cur.get("username") or cur.get("name"),
+                viewer,
                 cur.get("role"),
-                "Audit log viewed",
-                "",
+                "Audit trails viewed",
+                "{} viewed audit trails".format(viewer),
             )
 
         user = request.args.get("user")
@@ -4514,12 +4542,15 @@ def confirm_audit_export():
         scheduled = audit_service.confirm_audit_export_verified(export_id)
         if not scheduled:
             return jsonify({"success": False, "error": "Export session expired or invalid. Export again."}), 400
+        n_entries = len(scheduled.get("entry_ids") or [])
         _audit(
             cur.get("username") or cur.get("name"),
             cur.get("role"),
-            "Audit export verified",
-            "USB export verified; {} entries scheduled for removal after 24 hours".format(
-                len(scheduled.get("entry_ids") or [])
+            "Export completed",
+            _export_completed_detail(
+                scheduled.get("exported_by"),
+                scheduled.get("approved_by"),
+                "audit trails ({} entries)".format(n_entries),
             ),
         )
         return jsonify({
@@ -4557,9 +4588,11 @@ def confirm_report_export():
         _audit(
             cur.get("username") or cur.get("name"),
             cur.get("role"),
-            "Report export verified",
-            "USB export verified; {} report(s) scheduled for removal after 24 hours".format(
-                len(scheduled.get("report_ids") or [])
+            "Export completed",
+            _export_completed_detail(
+                scheduled.get("exported_by"),
+                scheduled.get("approved_by"),
+                _report_export_kind_summary(scheduled.get("report_ids") or []),
             ),
         )
         return jsonify({

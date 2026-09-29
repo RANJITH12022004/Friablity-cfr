@@ -27,8 +27,6 @@ FACTORY_PASS = os.environ.get("FACTORY_PASS", "Rahul")
 # Actions exercised in this run (simulates UI button flows via audit-log/event + server routes)
 EXPECTED_ACTIONS = [
     "Login",
-    "Entered screen",
-    "Exited screen",
     "Opened Quick Test",
     "Quick test started",
     "Test started",
@@ -169,14 +167,10 @@ def actions_in(entries: list) -> set:
 
 def simulate_ui_flow(c: Client, res: RunResult) -> None:
     """Mirror script.js logAuditEvent calls for navigation + test/validation lifecycle."""
-    c.audit_event("Entered screen", "Home", eventType="navigation")
     c.audit_event("Opened Quick Test", "Quick Test screen opened", eventType="navigation")
-    c.audit_event("Entered screen", "Quick Test", eventType="navigation")
     c.audit_event("Quick test started", "Quick Test, USP 1, 10 step(s)", eventType="lifecycle", extra={"productName": "Quick Test"})
-    c.audit_event("Entered screen", "Test Run", eventType="navigation")
     c.audit_event("Test started", "Quick Test, USP 1, 10 step(s)", eventType="lifecycle")
     c.audit_event("Test finished", "Test run completed, 3 step(s) recorded", eventType="lifecycle", extra={"completedSteps": 3})
-    c.audit_event("Exited screen", "Test Run", eventType="navigation")
     c.audit_event("Opened Load Recipe", "Load Recipe list opened", eventType="navigation")
     c.audit_event(
         "Loaded recipe",

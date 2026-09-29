@@ -3960,6 +3960,9 @@ def create_client_audit_event():
         details = str(payload.get("details") or "").strip()
         if not action:
             return jsonify({"ok": False, "error": "action is required"}), 400
+        # Page enter/exit rows flooded the trail. Real actions still go through.
+        if action in ("Entered screen", "Exited screen"):
+            return jsonify({"ok": True, "ignored": True}), 200
         actor = _audit_actor()
         outcome = str(payload.get("outcome") or "success").strip() or "success"
         event_type = str(payload.get("eventType") or payload.get("event_type") or "lifecycle").strip() or "lifecycle"

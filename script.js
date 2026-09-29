@@ -1631,17 +1631,11 @@ function auditNavPageChange(newPage) {
         return;
     }
     if (effectivePage === _auditActivePage) return;
-    var prev = _auditActivePage;
     _auditActivePage = effectivePage;
-    if (prev && !_auditSkipPages[prev]) {
-        logAuditEvent('Exited screen', auditPageLabel(prev), { eventType: 'navigation' });
-    }
     if (effectivePage === 'usp1-detail') {
         logAuditEvent('Entered USP 1 validation', 'USP 1 validation screen', { eventType: 'navigation' });
     } else if (effectivePage === 'usp2-detail') {
         logAuditEvent('Entered USP 2 validation', 'USP 2 validation screen', { eventType: 'navigation' });
-    } else {
-        logAuditEvent('Entered screen', auditPageLabel(effectivePage), { eventType: 'navigation' });
     }
 }
 
@@ -3300,7 +3294,6 @@ function _populateAuditFilterDropdowns(userEl, actionEl, fullList) {
     });
     var coreActions = [
         'Login', 'Logout', 'Logout (inactivity timeout)', 'User logged in',
-        'Entered screen', 'Exited screen',
         'Opened Quick Test', 'Opened Load Recipe', 'Opened Manage Recipe', 'Loaded recipe',
         'Opened disabled recipes',
         'Test started', 'Quick test started', 'Test finished', 'Test aborted', 'Test auto-aborted',
@@ -5363,16 +5356,9 @@ function filterReports(type) {
     var willAudit = type === 'audit';
     loadReports(type);
     if (wasAudit === willAudit) return;
-    if (wasAudit) {
-        logAuditEvent('Exited screen', 'Audits', { eventType: 'navigation' });
-    } else if (_auditActivePage === 'reports') {
-        logAuditEvent('Exited screen', 'Reports', { eventType: 'navigation' });
-    }
     if (willAudit) {
-        logAuditEvent('Entered screen', 'Audits', { eventType: 'navigation' });
         _auditActivePage = 'audits';
     } else {
-        logAuditEvent('Entered screen', 'Reports', { eventType: 'navigation' });
         _auditActivePage = 'reports';
     }
 }

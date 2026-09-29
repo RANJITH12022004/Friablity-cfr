@@ -3589,12 +3589,24 @@ def approval_verify():
             verifier, purpose, report_type=report_type_for_verify if purpose == "report" else None
         )
         vname = verifier.get("username") or username
+        if purpose == "export":
+            cur_user = data_service.get_current_user() or {}
+            exporter = _export_actor_snapshot(cur_user)
+            approver = _export_actor_snapshot(
+                {"username": vname, "role": verifier.get("role") or verifier_role}
+            )
+            verify_details = "Export approval token issued | approved by {} | exporting user {}".format(
+                _export_identity_label(approver),
+                _export_identity_label(exporter),
+            )
+        else:
+            verify_details = "Verification token issued"
         _audit_event(
             action="Approval verification",
             outcome="success",
             entity_type="verification",
             entity_name=purpose,
-            details="Verification token issued",
+            details=verify_details,
             target_user=vname,
             signature={"mode": method, "username": vname, "role": verifier_role},
             extra={"purpose": purpose, "method": method},
@@ -3837,11 +3849,21 @@ def _stage_audit_usb_export(cur, verifier, entry_ids, pdf_path=""):
     return export_id, exported_by, approved_by
 
 
+def _export_identity_label(actor) -> str:
+    """Print both the login name and the member user ID."""
+    actor = actor or {}
+    username = str(actor.get("username") or "--").strip() or "--"
+    user_id = str(actor.get("employee_id") or "--").strip() or "--"
+    return "username {}, user ID {}".format(username, user_id)
+
+
 def _export_completed_detail(exported_by, approved_by, what):
-    """One line: who exported, who approved, and what left the instrument."""
-    ex = str((exported_by or {}).get("username") or "--").strip() or "--"
-    ap = str((approved_by or {}).get("username") or "--").strip() or "--"
-    return "{} exported | {} approved | {}".format(ex, ap, what)
+    """Who exported, who approved, with username and user ID, and what left the instrument."""
+    return "exported by {} | approved by {} | {}".format(
+        _export_identity_label(exported_by),
+        _export_identity_label(approved_by),
+        what,
+    )
 
 
 def _report_export_kind_summary(report_ids) -> str:
@@ -3939,12 +3961,13 @@ def get_audit_log():
             return jsonify({"error": "Forbidden. You do not have permission to view the audit log."}), 403
 
         if str(request.args.get("log_view") or "").strip() == "1":
-            viewer = str(cur.get("username") or cur.get("name") or "--").strip() or "--"
+            viewer_name = str(cur.get("username") or cur.get("name") or "--").strip() or "--"
+            viewer = _export_actor_snapshot(cur)
             _audit(
-                viewer,
+                viewer_name,
                 cur.get("role"),
                 "Audit trails viewed",
-                "{} viewed audit trails".format(viewer),
+                "{} viewed audit trails".format(_export_identity_label(viewer)),
             )
 
         user = request.args.get("user")

@@ -14,6 +14,9 @@ from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_ROOT))
+# This script imports app.py to simulate recovery. Allow that even when the
+# live kiosk already holds the UART lock.
+os.environ["KIOSK_FORCE_POWER_RECOVERY"] = "1"
 
 BASE = os.environ.get("KIOSK_API_BASE", "http://127.0.0.1:5000")
 TEST_USER = os.environ.get("AUDIT_TEST_USER", "Test@123")

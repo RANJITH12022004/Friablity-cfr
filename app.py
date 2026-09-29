@@ -5912,10 +5912,16 @@ def _start_export_purge_thread():
     t.start()
 
 
-_startup_session_power_audit()
-_register_clean_shutdown_signals()
-_register_clean_shutdown_atexit()
-_start_export_purge_thread()
+if hardware_service.is_primary_kiosk_process():
+    _startup_session_power_audit()
+    _register_clean_shutdown_signals()
+    _register_clean_shutdown_atexit()
+    _start_export_purge_thread()
+else:
+    app.logger.warning(
+        "PID %s is not the kiosk owner; skipping power-cut recovery so a live test is not auto-approved",
+        os.getpid(),
+    )
 
 
 # =================== MAIN ==========================

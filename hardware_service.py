@@ -367,6 +367,18 @@ def _acquire_uart_owner_lock() -> bool:
     return True
 
 
+def is_primary_kiosk_process() -> bool:
+    """True only for the process that owns the kiosk UART lock.
+
+    A second bridge.py (legacy bridge.service) imports this app, fails to bind
+    port 5000, and exits. That import must not run power-cut recovery or it
+    marks a live or just-finished test as a power interruption.
+    """
+    if os.environ.get("KIOSK_FORCE_POWER_RECOVERY") == "1":
+        return True
+    return bool(_hardware_owner_active)
+
+
 def init(app, config):
     global _logger, _config, _esp_port, line_q, sse_clients, _uart_log_path, _boot_marker_path
     global _hardware_init_done, _hardware_owner_active

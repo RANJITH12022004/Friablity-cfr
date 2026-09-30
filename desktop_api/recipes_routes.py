@@ -105,6 +105,9 @@ def register_recipes_routes(bp, kiosk):
             tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks, kiosk)
             if tok_err:
                 return jsonify({"error": tok_err}), 401
+            blocked = kiosk._recipe_save_blocked(processed)
+            if blocked is not None:
+                return blocked
             recipe_id = data_service.save_recipe(processed)
             if audit_created:
                 audit_created(processed, recipe_id)
@@ -153,6 +156,9 @@ def register_recipes_routes(bp, kiosk):
             tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks, kiosk)
             if tok_err:
                 return jsonify({"error": tok_err}), 401
+            blocked = kiosk._recipe_save_blocked(processed, exclude_id=recipe_id)
+            if blocked is not None:
+                return blocked
             data_service.save_recipe(processed)
             if audit_edited:
                 audit_edited(before_recipe, processed, recipe_id)

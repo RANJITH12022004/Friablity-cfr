@@ -1591,6 +1591,33 @@ def _payload_has_protected_feature_overrides(member_data):
     return False
 
 
+def _recipe_display_name(recipe) -> str:
+    return str((recipe or {}).get("productName") or (recipe or {}).get("name") or "").strip()
+
+
+def _recipe_save_blocked(processed, exclude_id=None):
+    """Return a Flask error response, or None when this recipe may be stored.
+
+    Unapproved recipes are not written. A second copy of the same name is not written.
+    """
+    if str((processed or {}).get("recipeApprovalStatus") or "").strip().lower() != "approved":
+        return jsonify({
+            "error": "Recipe is not approved. Only an approved recipe is saved.",
+        }), 403
+    name = _recipe_display_name(processed).lower()
+    if not name:
+        return jsonify({"error": "Recipe name is required."}), 400
+    skip = data_service._norm_recipe_id(exclude_id)
+    for existing in data_service.list_recipes() or []:
+        if skip is not None and data_service._norm_recipe_id(existing.get("id")) == skip:
+            continue
+        if _recipe_display_name(existing).lower() == name:
+            return jsonify({
+                "error": "A recipe with this name is already saved.",
+            }), 409
+    return None
+
+
 def _apply_recipe_approval_for_session_creator(processed):
     """Factory saves: approve immediately (no QA/Admin verification). Others: pending."""
     if _effective_request_role() != "factory":
@@ -1799,6 +1826,10 @@ def get_recipes():
         if gate:
             return gate
         recipes = data_service.list_recipes()
+        recipes = [
+            r for r in (recipes or [])
+            if str((r or {}).get("recipeApprovalStatus") or "").strip().lower() != "pending"
+        ]
         return jsonify({"recipes": recipes}), 200
     except Exception as e:
         app.logger.exception("Error listing recipes")
@@ -1824,6 +1855,9 @@ def create_recipe():
         tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks)
         if tok_err:
             return jsonify({"error": tok_err}), 401
+        blocked = _recipe_save_blocked(processed)
+        if blocked is not None:
+            return blocked
         recipe_id = data_service.save_recipe(processed)
         rlabel = processed.get("name") or processed.get("productName") or ""
         rd = "Recipe created: {}".format(rlabel or ("id {}".format(recipe_id)))
@@ -1899,6 +1933,9 @@ def update_recipe(recipe_id):
         tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks)
         if tok_err:
             return jsonify({"error": tok_err}), 401
+        blocked = _recipe_save_blocked(processed, exclude_id=recipe_id)
+        if blocked is not None:
+            return blocked
         data_service.save_recipe(processed)
         rlabel = processed.get("name") or processed.get("productName") or ""
         rd = "Recipe id {}".format(recipe_id)

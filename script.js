@@ -4093,7 +4093,10 @@ function applyRecipeModeToFields() {
     _setRecipeParamFieldState(countEl, !isTimeMode, true);
 }
 
+var _recipeSaveInFlight = false;
+
 function saveRecipeFromParams() {
+    if (_recipeSaveInFlight) return;
     var nameEl = document.getElementById('recipe-product-name');
     var productName = nameEl && nameEl.value ? nameEl.value.trim() : '';
     var speedEl = document.getElementById('recipe-speed');
@@ -4154,25 +4157,33 @@ function saveRecipeFromParams() {
     if (editId) recipe.id = editId;
     var url = editId ? (API_BASE + '/api/data/recipes/' + editId) : (API_BASE + '/api/data/recipes');
     var method = editId ? 'PUT' : 'POST';
+    var role = typeof getCurrentRole === 'function' ? String(getCurrentRole() || '').toLowerCase() : '';
 
-    apiRequest(url, { method: method, body: recipe }).then(function (result) {
-        window.currentEditingRecipeId = null;
-        goToPage('manage-recipes');
-        if (typeof loadManageRecipes === 'function') loadManageRecipes();
-        var rid = (result && result.id != null) ? result.id : ((result && result.recipe && result.recipe.id != null) ? result.recipe.id : null);
-        if (rid != null) {
-            setTimeout(function () {
-                approveSavedRecipeWithCredentials(rid, 'Save Recipe', '').then(function (res) {
-                    if (res && res.cancelled) {
-                        showAppModal('Recipe saved. It stays pending until a QA or Admin approves it.', 'Save Recipe');
-                    }
-                });
-            }, 50);
-        } else {
-            showAppModal('Recipe saved, but approval could not be started (missing recipe id).', 'Save Recipe');
+    _recipeSaveInFlight = true;
+    var tokenPromise = role === 'factory'
+        ? Promise.resolve('')
+        : refreshActiveQaCount().then(function () {
+            return openApprovalVerifyModal(_approvalVerifyModalOptionsForRecipe());
+        });
+
+    tokenPromise.then(function (token) {
+        if (role !== 'factory' && !token) {
+            return;
         }
+        var headers = token ? { 'X-Approval-Verify-Token': token } : {};
+        return apiRequest(url, { method: method, headers: headers, body: recipe }).then(function (result) {
+            window.currentEditingRecipeId = null;
+            goToPage('manage-recipes');
+            if (typeof loadManageRecipes === 'function') loadManageRecipes();
+            var rid = (result && result.id != null) ? result.id : ((result && result.recipe && result.recipe.id != null) ? result.recipe.id : null);
+            if (rid == null) {
+                showAppModal('Approved recipe was not saved (missing recipe id).', 'Save Recipe');
+            }
+        });
     }).catch(function (err) {
         showAppModal('Failed to save recipe: ' + ((err && err.message) ? err.message : 'Unknown error'), 'Create Recipe');
+    }).then(function () {
+        _recipeSaveInFlight = false;
     });
 }
 

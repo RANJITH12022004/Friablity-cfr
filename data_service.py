@@ -350,7 +350,7 @@ def save_recipe(recipe_data: Dict[str, Any]) -> int:
 
     if recipe_id and is_update:
         for i, r in enumerate(recipes):
-            if r.get("id") == recipe_id:
+            if _norm_recipe_id(r.get("id")) == recipe_id:
                 recipes[i] = recipe_data
                 _save_json_file(recipes_path, recipes)
                 return recipe_id

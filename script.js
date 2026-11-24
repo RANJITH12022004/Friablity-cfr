@@ -10259,3 +10259,201 @@ function _clearAddMemberForm() {
     if (gsel) gsel.value = '';
     _addMemberFeatureOverrides = { allow: [], deny: [] };
 }
+
+function bindSidebarNavigation() {
+    document.querySelectorAll('.nav-item[data-page]').forEach(function (btn) {
+        if (btn._sidebarNavBound) return;
+        btn._sidebarNavBound = true;
+        btn.addEventListener('click', function () {
+            var page = btn.getAttribute('data-page');
+            if (page && typeof goToPage === 'function') goToPage(page);
+        });
+    });
+}
+
+function clearSidebarInteractionLock() {
+    var app = document.querySelector('.app-container');
+    if (app) {
+        app.classList.remove('report-approval-locked');
+        app.classList.remove('validation-run-locked');
+        app.classList.remove('test-run-locked');
+    }
+    var sidebar = document.querySelector('.sidebar');
+    if (sidebar) sidebar.classList.remove('sidebar-locked');
+    document.querySelectorAll('.nav-item[data-page]').forEach(function (btn) {
+        btn.style.pointerEvents = '';
+        btn.style.opacity = '';
+        btn.removeAttribute('aria-disabled');
+    });
+    var profileEl = document.querySelector('.sidebar .user-profile');
+    var logoutBtn = document.querySelector('.sidebar .logout-btn');
+    [profileEl, logoutBtn].forEach(function (el) {
+        if (!el) return;
+        el.style.pointerEvents = '';
+        el.style.opacity = '';
+        el.removeAttribute('aria-disabled');
+    });
+    var logoEl = document.getElementById('header-logo');
+    if (logoEl) {
+        logoEl.style.pointerEvents = '';
+        logoEl.style.opacity = '';
+    }
+    var backBtn = document.getElementById('header-back-btn');
+    if (backBtn) backBtn.style.visibility = '';
+    document.querySelectorAll('.test-card').forEach(function (el) {
+        el.style.pointerEvents = '';
+        el.style.opacity = '';
+    });
+    var banner = document.getElementById('report-pending-lock-banner');
+    if (banner) banner.style.display = 'none';
+    document.querySelectorAll('#page-report-preview .btn-close, #page-report-preview .btn-secondary').forEach(function (el) {
+        el.style.pointerEvents = '';
+        el.style.opacity = '';
+        el.removeAttribute('aria-disabled');
+    });
+    var closeBtn = document.querySelector('#report-preview-actions .btn-close');
+    if (closeBtn) closeBtn.style.display = '';
+}
+
+function attachKeyboardToInputs() {
+    if (typeof window.openOSKForInput !== 'function') return;
+    var selectors = [
+        'input[type="text"]',
+        'input[type="number"]',
+        'input[type="password"]',
+        'input[type="email"]',
+        'input[type="tel"]',
+        'input[type="search"]',
+        'input[type="url"]',
+        'textarea'
+    ].join(', ');
+    document.querySelectorAll(selectors).forEach(function (input) {
+        if (!input || input.closest('#keyboard-root')) return;
+        if (input.readOnly || input.disabled) return;
+        if (input.type === 'hidden' || input.type === 'checkbox' || input.type === 'radio' || input.type === 'file' || input.type === 'range' || input.type === 'color') return;
+
+        if (input._keyboardFocusHandler) {
+            input.removeEventListener('focus', input._keyboardFocusHandler);
+        }
+        input._keyboardFocusHandler = function () {
+            if (typeof window.openOSKForInput === 'function') {
+                window.openOSKForInput(input);
+            }
+        };
+        input.addEventListener('focus', input._keyboardFocusHandler);
+
+        if (input._keyboardClickHandler) {
+            input.removeEventListener('click', input._keyboardClickHandler);
+        }
+        input._keyboardClickHandler = function () {
+            if (typeof window.openOSKForInput === 'function') {
+                window.openOSKForInput(input);
+            }
+        };
+        input.addEventListener('click', input._keyboardClickHandler);
+    });
+}
+
+function bindTestRunDecimalInputs() {
+    document.querySelectorAll('input[data-decimal-input="true"], input.decimal-input').forEach(function (input) {
+        if (!input || input._decimalInputBound) return;
+        input._decimalInputBound = true;
+        input.addEventListener('blur', function () {
+            var v = String(input.value || '').trim();
+            if (!v) return;
+            var n = parseFloat(v);
+            if (!isNaN(n) && n >= 0) input.value = (Math.round(n * 1000) / 1000).toFixed(3);
+        });
+    });
+}
+
+function initKioskShellAfterLoad() {
+    try {
+        bindTestRunDecimalInputs();
+        if (typeof closeOSK === 'function') closeOSK();
+        _attachAllKeyboardHandlers(document);
+        if (typeof ensureMainContentTouchScroll === 'function') ensureMainContentTouchScroll();
+        loadBiometricSetting();
+        loadLoginFactorySettingsDisplay();
+    } catch (e) {
+        console.error('Kiosk shell init (partial):', e);
+    }
+    bindSidebarNavigation();
+    if (typeof reapplyReportPreviewLockIfNeeded === 'function') reapplyReportPreviewLockIfNeeded();
+    else clearSidebarInteractionLock();
+
+    if (!window._goToPageWrapped) {
+        window._goToPageWrapped = true;
+        var originalGoToPage = goToPage;
+        goToPage = function (pageName) {
+            if (typeof markAutoLogoutActivity === 'function') markAutoLogoutActivity();
+            if (originalGoToPage) originalGoToPage(pageName);
+            setTimeout(function () {
+                _attachAllKeyboardHandlers(document);
+            }, 200);
+        };
+    }
+
+    // Wire up Create Recipe Step 1 inputs to enable Continue button
+    var recipeNameEl = document.getElementById('recipe-product-name');
+    if (recipeNameEl && !recipeNameEl._createRecipeNameBound) {
+        recipeNameEl._createRecipeNameBound = true;
+        recipeNameEl.addEventListener('input', updateCreateRecipeContinueButton);
+    }
+    document.querySelectorAll('input[name="recipe-speed"], #recipe-speed').forEach(function (el) {
+        if (el._createRecipeSpeedBound) return;
+        el._createRecipeSpeedBound = true;
+        el.addEventListener('change', updateCreateRecipeContinueButton);
+        el.addEventListener('input', updateCreateRecipeContinueButton);
+    });
+    document.querySelectorAll('input[name="create-usp-mode"]').forEach(function (el) {
+        if (el._createUspModeBound) return;
+        el._createUspModeBound = true;
+        el.addEventListener('change', function () {
+            if (typeof applyRecipeModeToFields === 'function') applyRecipeModeToFields();
+        });
+    });
+    document.querySelectorAll('input[name="recipe-custom-completion"]').forEach(function (el) {
+        if (el._recipeCompletionBound) return;
+        el._recipeCompletionBound = true;
+        el.addEventListener('change', function () {
+            if (typeof applyRecipeModeToFields === 'function') applyRecipeModeToFields();
+        });
+    });
+    document.querySelectorAll('input[name="quick-usp-mode"]').forEach(function (el) {
+        if (el._quickUspModeBound) return;
+        el._quickUspModeBound = true;
+        el.addEventListener('change', function () {
+            if (typeof applyQuickRecipeModeToFields === 'function') applyQuickRecipeModeToFields();
+        });
+    });
+    document.querySelectorAll('input[name="quick-recipe-custom-completion"]').forEach(function (el) {
+        if (el._quickCompletionBound) return;
+        el._quickCompletionBound = true;
+        el.addEventListener('change', function () {
+            if (typeof applyQuickRecipeModeToFields === 'function') applyQuickRecipeModeToFields();
+        });
+    });
+    if (typeof applyRecipeModeToFields === 'function') applyRecipeModeToFields();
+    if (typeof applyQuickRecipeModeToFields === 'function') applyQuickRecipeModeToFields();
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    initKioskShellAfterLoad();
+
+    function resetKioskSessionAndShowLogin() {
+        try { localStorage.removeItem('currentUser'); } catch (e) {}
+        window.currentUser = null;
+        if (typeof currentUser !== 'undefined') currentUser = null;
+        if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
+        window._lastReportPreview = null;
+        clearSidebarInteractionLock();
+        var resetUrl = (API_BASE || '') + '/api/data/auth/session-ui-reset';
+        fetch(resetUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+            .catch(function () {})
+            .finally(function () {
+                showLoginScreen();
+            });
+    }
+    resetKioskSessionAndShowLogin();
+});

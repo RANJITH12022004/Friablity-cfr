@@ -326,6 +326,20 @@ def create_blueprint(kiosk):
         if not (path.exists() and path.stat().st_size > 0):
             if not kiosk._generate_report_pdf_file(report_id, write_audit=True):
                 return jsonify({"error": "PDF generation failed"}), 500
+        purpose = str(request.args.get("purpose") or request.args.get("source") or "download").strip().lower()
+        if purpose not in ("view", "download", "sync", "zip"):
+            purpose = "download"
+        uname = user.get("username") or user.get("name") or "--"
+        role = user.get("role") or "--"
+        if purpose == "view":
+            action = "Report previewed"
+            details = "Previewed via desktop client | report-{}.pdf | by {} ({})".format(report_id, uname, role)
+        else:
+            action = "Report downloaded"
+            details = "Downloaded via desktop client ({}) | report-{}.pdf | by {} ({})".format(
+                purpose, report_id, uname, role
+            )
+        log_audit(user, action, details)
         return send_file(path, mimetype="application/pdf", as_attachment=False, download_name="report-{}.pdf".format(report_id))
 
     @bp.route("/reports/download", methods=["POST"])
@@ -375,6 +389,19 @@ def create_blueprint(kiosk):
                     "error": "No PDF files could be added to the ZIP. Reports must be approved or aborted before download.",
                     "skipped": skipped,
                 }), 400
+            uname = user.get("username") or user.get("name") or "--"
+            role = user.get("role") or "--"
+            log_audit(
+                user,
+                "Report downloaded",
+                "Downloaded {} report{} via desktop client (ZIP) | by {} ({}){}".format(
+                    added,
+                    "" if added == 1 else "s",
+                    uname,
+                    role,
+                    " | skipped {}".format(skipped) if skipped else "",
+                ),
+            )
             return _send_temp(tmp, "reports-download.zip", "application/zip")
         except Exception:
             try:
@@ -416,13 +443,11 @@ def create_blueprint(kiosk):
                 tmp,
                 timeout_sec=per_chunk_timeout,
             )
-            if audit_log:
-                audit_log(
-                    user.get("username") or user.get("name"),
-                    user.get("role"),
-                    "Desktop audit downloaded",
-                    "{} entries".format(len(entries)),
-                )
+            log_audit(
+                user,
+                "Audit trail downloaded",
+                "Downloaded via desktop client | {} entries".format(len(entries)),
+            )
             return _send_temp(tmp, "audit-download.pdf", "application/pdf")
         except Exception:
             try:
